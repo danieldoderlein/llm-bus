@@ -16,6 +16,7 @@
     "migrate": "tsx db/migrate.ts",
     "migrate:prod": "node dist/db/migrate.js",
     "start": "node dist/src/server.js",
+    "start:stdio": "node dist/src/stdio.js",
     "dev": "tsx src/server.ts",
     "seed-token": "tsx scripts/seed-token.ts",
     "live-check": "tsx scripts/live-check.ts",
