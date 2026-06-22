@@ -1,0 +1,8 @@
+{
+  "endpoint": "https://mcp.llm-bus.com/mcp",
+  "tokenEnv": "LLM_BUS_TOKEN",
+  "sequences": {
+    "docs/decisions/*.md": "adr",
+    "**/migrations/*.sql": "migration"
+  }
+}

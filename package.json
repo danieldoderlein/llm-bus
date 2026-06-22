@@ -1,0 +1,54 @@
+{
+  "name": "@llm-bus/server",
+  "version": "2.0.0-rc.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "author": "Daniel R. Döderlein (https://doderlein.com)",
+  "homepage": "https://llm-bus.com",
+  "description": "LLM Bus - multi-project MCP coordination server: atomic allocation, presence, posts, leases, task graph, queryable ledger.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc && cp db/schema.sql dist/db/schema.sql",
+    "migrate": "tsx db/migrate.ts",
+    "migrate:prod": "node dist/db/migrate.js",
+    "start": "node dist/src/server.js",
+    "dev": "tsx src/server.ts",
+    "seed-token": "tsx scripts/seed-token.ts",
+    "live-check": "tsx scripts/live-check.ts",
+    "mirror-export": "tsx scripts/mirror-export.ts",
+    "test:concurrency": "tsx test/concurrency.claim.test.ts",
+    "test:smoke": "tsx test/smoke.mcp.test.ts",
+    "test:post": "tsx test/post.ack.test.ts",
+    "test:lease": "tsx test/lease.expiry.test.ts",
+    "test:task": "tsx test/task.statemachine.test.ts",
+    "test:digest": "tsx test/digest.cursor.test.ts",
+    "test:isolation": "tsx test/isolation.project.test.ts",
+    "test:failopen": "tsx test/hook.failopen.test.ts",
+    "test:admin-crud": "tsx test/admin.crud.test.ts",
+    "test:admin-isolation": "tsx test/admin.isolation.test.ts",
+    "test:admin-authheader": "tsx test/admin.authheader.test.ts",
+    "test:invite": "tsx test/invite.redeem.test.ts",
+    "test:invite-accept": "tsx test/invite.accept.test.ts",
+    "test:oauth": "tsx test/oauth.signup.test.ts",
+        "test:identity": "tsx test/identity.handle.test.ts",
+"test:email": "tsx test/email.smtp.test.ts",
+    "bootstrap-owner": "tsx scripts/bootstrap-owner.ts",
+    "verify": "npm run typecheck && npm run test:concurrency && npm run test:smoke && npm run test:post && npm run test:identity && npm run test:lease && npm run test:task && npm run test:digest && npm run test:isolation && npm run test:failopen && npm run test:admin-crud && npm run test:admin-isolation && npm run test:admin-authheader && npm run test:invite && npm run test:invite-accept && npm run test:oauth && npm run test:email"
+  },
+  "dependencies": {
+    "@google-cloud/cloud-sql-connector": "1.11.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "pg": "8.21.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.2",
+    "@types/pg": "8.20.0",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.log
+coverage/
+.claude/settings.local.json
+.claude/worktrees/
+
+# macOS
+.DS_Store

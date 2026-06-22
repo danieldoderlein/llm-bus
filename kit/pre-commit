@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# LLM Bus pre-commit hook — FAIL OPEN.
+# Runs the reconcile hook over the staged files. If anything goes wrong launching node
+# or the hook itself, this shim still allows the commit (the reconcile hook owns the
+# fail-open contract; this wrapper only adds a belt-and-suspenders guard around exec).
+set -u
+
+# Resolve this script's own directory so we can find reconcile-hook.mjs next to it,
+# even when invoked from .git/hooks via a copy.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+HOOK_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+HOOK_MJS="$HOOK_DIR/reconcile-hook.mjs"
+if [ ! -f "$HOOK_MJS" ]; then
+  echo "[llm-bus] reconcile-hook.mjs not found next to pre-commit; fail open." >&2
+  exit 0
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "[llm-bus] node not found on PATH; fail open." >&2
+  exit 0
+fi
+
+exec node "$HOOK_MJS" --staged

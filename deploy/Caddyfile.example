@@ -1,0 +1,36 @@
+# Generic LLM Bus reverse-proxy example (Caddy). Replace bus.example.com with your host.
+# Caddy terminates TLS and auto-issues certificates. The app listens on 127.0.0.1:8787.
+#
+# SECURITY: the request_header strip below is the anti-spoof line and MUST stay first. The web admin
+# (in header mode) trusts an SSO-set identity header; stripping any client-supplied copy before any
+# route runs is what makes that trust safe. See SELFHOSTING.md.
+
+bus.example.com {
+	# --- anti-spoof: strip any client-supplied identity headers (must stay first) ---
+	request_header -X-Auth-Request-Email
+	request_header -X-Auth-Request-User
+	request_header -X-Auth-Request-Groups
+	request_header -X-Forwarded-Email
+
+	# Option A (ADMIN_AUTH_SOURCE=oauth): the app handles admin login itself - just proxy everything.
+	reverse_proxy 127.0.0.1:8787
+
+	# Option B (ADMIN_AUTH_SOURCE=header): instead of the line above, gate /admin and /operator behind
+	# your SSO proxy (e.g. oauth2-proxy) that injects a verified email header, and proxy the public
+	# routes (/mcp, /healthz, /join) straight to the app. Sketch:
+	#
+	#   @public path /mcp /mcp/* /healthz /join
+	#   handle @public { reverse_proxy 127.0.0.1:8787 }
+	#   handle /oauth2/* { reverse_proxy 127.0.0.1:4180 }
+	#   @admin path /admin /admin/* /operator /operator/*
+	#   handle @admin {
+	#       forward_auth 127.0.0.1:4180 {
+	#           uri /oauth2/auth
+	#           copy_headers X-Auth-Request-Email
+	#           @unauthorized status 401
+	#           handle_response @unauthorized { redir https://bus.example.com/oauth2/start?rd={uri} 302 }
+	#       }
+	#       reverse_proxy 127.0.0.1:8787
+	#   }
+	#   handle { reverse_proxy 127.0.0.1:8787 }
+}

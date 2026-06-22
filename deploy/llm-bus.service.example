@@ -1,0 +1,33 @@
+# Generic systemd unit for LLM Bus. Copy to /etc/systemd/system/llm-bus.service, edit the User and
+# the EnvironmentFile path, then: systemctl daemon-reload && systemctl enable --now llm-bus.
+# Keep secrets (DATABASE_URL, OAuth client secrets) in the EnvironmentFile, not in this unit.
+
+[Unit]
+Description=LLM Bus - MCP coordination server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llmbus
+WorkingDirectory=/opt/llm-bus
+# Secrets (DATABASE_URL, GOOGLE_CLIENT_SECRET, ...) live here, root-owned, chmod 600:
+EnvironmentFile=/etc/llm-bus/llm-bus.env
+# Non-secret config:
+Environment=PORT=8787
+Environment=PUBLIC_URL=https://bus.example.com
+Environment=ALLOWED_HOSTS=bus.example.com
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/llm-bus/dist/src/server.js
+Restart=on-failure
+RestartSec=10
+
+# Hardening - the app writes nothing to disk.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
