@@ -7,7 +7,6 @@ not).
 
 ## Nodes
 
-- [[onboarding-mcp-enrollment]] (research) - bulletproof "copy-paste = it just works" MCP enrollment;
   root causes, the `claude mcp add` deterministic flow, failure-mode table, and code changes.
 
 ## History

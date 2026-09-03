@@ -18,9 +18,9 @@
   concurrent claims can never receive the same id and no id is handed out without a logged event.
   Empirically verified: 500 concurrent claims -> 500 distinct, gap-free ids, 500 events
   (`test/concurrency.claim.test.ts`).
-- **Hosting:** the shared `odina-vm` (GCP), namespaced to `yolo` - own `/opt/yolo`, own Postgres
+- **Hosting:** the shared `the deploy host` (GCP), namespaced to `yolo` - own `/opt/yolo`, own Postgres
   role + database on the existing cluster (port 5433), own `yolo.service` systemd unit bound to
-  `127.0.0.1:8787`, public via one additive Caddy vhost at `https://yolo.doderlein.com`. No Docker
+  `127.0.0.1:8787`, public via one additive Caddy vhost at `https://yolo.example.com`. No Docker
   on the VM for the app itself.
 
 ## Context

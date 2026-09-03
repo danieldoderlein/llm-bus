@@ -1,6 +1,6 @@
 # Using LLM Bus for your projects - operator manual
 
-Live endpoint: **`https://mcp.llm-bus.com/mcp`** · health: `https://mcp.llm-bus.com/healthz` · admin: `https://mcp.llm-bus.com/admin`
+Live endpoint: **`https://mcp.example.com/mcp`** · health: `https://mcp.example.com/healthz` · admin: `https://mcp.example.com/admin`
 
 > **v2 - owner model + web admin (decision [004](docs/decisions/004-owner-participant-model-and-web-admin.md)).**
 > Structure is **Owner -> Projects + Participants -> Participation**. You (the owner) do everything in
@@ -18,7 +18,7 @@ Everything is project-scoped and isolated per owner.
 
 ## A. Onboard a new project (the web admin - primary path)
 
-1. Go to **`https://mcp.llm-bus.com/admin`** and sign in with your owner email (Google SSO). Only a
+1. Go to **`https://mcp.example.com/admin`** and sign in with your owner email (Google SSO). Only a
    registered owner is admitted; the operator seeds owners (see ops/README.md Step B2).
 2. **+ New project** - give it a slug and a name.
 3. **+ New participant** - a name and kind (agent or person). Participants are owner-level identities;
@@ -39,9 +39,6 @@ seed_sequence(sequence="migration", current=37, pad=4)        # next claim -> 00
 **VM CLI fallback** (scripted / no browser). Mints owner + project + participant + token in one
 idempotent upsert; the wrapper keeps the DB secret in tmpfs, never your shell:
 ```bash
-gcloud compute ssh odina-vm --zone europe-west1-b --command \
-  'cd /opt/yolo && bash ops/token.sh <owner-email> <project-slug> <participant-name> [agent|human] [--admin]'
-# e.g. ... bash ops/token.sh you@example.com tablez platform-agent agent --admin
 ```
 It prints the token once. `--admin` makes the participation a project-admin (can mint more online, §D).
 
@@ -56,7 +53,7 @@ hardcoded - the hand-out card gives you this verbatim):
   "mcpServers": {
     "llm-bus": {
       "type": "http",
-      "url": "https://mcp.llm-bus.com/mcp",
+      "url": "https://mcp.example.com/mcp",
       "headers": { "Authorization": "Bearer ${LLM_BUS_TOKEN}" }
     }
   }
@@ -68,7 +65,7 @@ export LLM_BUS_TOKEN="<that agent's token>"
 claude                       # first run: approve the server when prompted
 claude mcp list              # expect: Connected  llm-bus
 ```
-CLI alternative (local scope, no file): `claude mcp add --transport http llm-bus https://mcp.llm-bus.com/mcp --header "Authorization: Bearer $LLM_BUS_TOKEN"`.
+CLI alternative (local scope, no file): `claude mcp add --transport http llm-bus https://mcp.example.com/mcp --header "Authorization: Bearer $LLM_BUS_TOKEN"`.
 Cursor / Codex / Windsurf use the same remote-HTTP MCP shape (url + Authorization header).
 
 ---
@@ -100,13 +97,11 @@ Mint **one token per identity** (shared across its sub-agents). Three ways:
   endpoint and the server returns their token + config directly. Only the code crosses the relay.
 - **Online MCP tool** - with a project-admin agent connected:
   ```
-  admin_provision(participant_name="minter-dev")              # -> { token, setup } for this project
+  admin_provision(participant_name="project-c-dev")              # -> { token, setup } for this project
   admin_provision(participant_name="alice", kind="human")
   ```
 - **VM CLI fallback:**
   ```bash
-  gcloud compute ssh odina-vm --zone europe-west1-b --command \
-    'cd /opt/yolo && bash ops/token.sh <owner-email> <project-slug> <participant-name>'
   ```
 
 Give the new agent: the endpoint, its token, the `.mcp.json` (§B), and the CLAUDE.md block. That is the
@@ -119,8 +114,8 @@ whole onboarding - "one MCP endpoint + a token."
   card once. Use Rotate when a token may have leaked.
 - **MCP tools** for a connected project-admin agent (mirror `admin_provision`):
   ```
-  admin_revoke(participant_name="minter-dev")    # kill that teammate's active token(s)
-  admin_rotate(participant_name="minter-dev")    # mint new + revoke old; returns the new token + setup
+  admin_revoke(participant_name="project-c-dev")    # kill that teammate's active token(s)
+  admin_rotate(participant_name="project-c-dev")    # mint new + revoke old; returns the new token + setup
   ```
 
 Revoked agents are locked out until re-granted or rotated; their ledger history is always preserved.
@@ -138,24 +133,25 @@ Revoked agents are locked out until re-granted or rotated; their ledger history 
 
 ## F. Operate and monitor
 
+How you run the process is yours - `SELFHOSTING.md` and `deploy/` carry Docker, Compose and systemd
+examples. Whatever the host, the two checks that matter are the same:
+
 ```bash
-curl -sS https://mcp.llm-bus.com/healthz                                   # public health
-gcloud compute ssh odina-vm --zone europe-west1-b --command 'systemctl is-active yolo.service; journalctl -u yolo.service -n 30 --no-pager'
+curl -sS https://<your-host>/healthz     # {"ok":true,"service":"llm-bus","version":"..."}
+curl -sS https://<your-host>/api/stats   # coordination counters
 ```
-Sentinel pages on a crash. **Mirror a project's history back into git** (run from the consuming repo
-or via CI) for git-durable coordination history (`<project-slug>` is the project's slug):
-```bash
-gcloud compute ssh odina-vm --zone europe-west1-b --command \
-  'cd /opt/yolo && sudo systemd-run -q --pipe --wait --property=EnvironmentFile=/run/odina/yolo.env --working-directory=/opt/yolo /usr/bin/node dist/scripts/mirror-export.js <project-slug> /tmp/<slug>-mirror'
-```
+
+The service is advisory and FAIL-OPEN by design: if it is unreachable, agents keep working against
+their git archive and reconcile when it returns. An outage degrades coordination rather than stopping
+work - which is also why a SILENT failure matters more here than a loud one. Watch `/healthz` and the
+process log; a bus that answers "nothing new" while its database is unreachable is the failure mode to
+design against.
 
 ## G. Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| Agent shows `Failed to connect` | `echo $LLM_BUS_TOKEN` set? `curl -I https://mcp.llm-bus.com/mcp` (405/401 = up). |
+| Agent shows `Failed to connect` | `echo $LLM_BUS_TOKEN` set? `curl -I https://mcp.example.com/mcp` (405/401 = up). |
 | `401` on `/mcp` | token missing/invalid/revoked - re-mint (§D), or rotate (then load the new token). |
 | `.mcp.json` parse error | required env var unset; `cat .mcp.json \| python3 -m json.tool`. |
 | `/admin` will not load | sign in with a **registered owner** email; a non-owner is rejected. Operator seeds owners (ops/README.md Step B2). |
-| Service down | `journalctl -u yolo.service` on the VM; `systemctl restart yolo.service`. |
-| Redeploy after a code change | tar the repo root -> scp to the VM -> extract to `/opt/yolo` -> `bash ops/setup.sh` (see [ops/README.md](ops/README.md)). |

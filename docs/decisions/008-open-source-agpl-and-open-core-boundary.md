@@ -93,7 +93,7 @@ friction trap to avoid pre-network.
   a spoofable admin. See [009](009-hosting-cloud-run-cloud-sql.md) for how the hosted service replaces
   that boundary.
 - A secrets scrub precedes any public push: no plaintext token or live `DATABASE_URL` in the tree or
-  history; private-host references (`odina`, `doderlein.com`) genericized outside the operator-private
+  history; private-host references (`deploy`, `example.com`) genericized outside the operator-private
   `ops/` deploy notes.
 
 ## Follow-ups

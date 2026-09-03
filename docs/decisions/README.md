@@ -1,22 +1,60 @@
-# Decision log
+# Decisions
 
-Per-decision records, three-digit and monotonic, never reused. Newest decisions may supersede or
-reverse older ones; the older record's Status is updated in place.
+Architecture decisions for the LLM Bus engine, newest last. This is a CURATED set: decisions
+covering the hosted service's commercial and operational concerns (billing, marketing surfaces, the
+operator's own deploy and governance) are not part of the open-source engine and are not published.
 
-001. [Build LLM Bus as a standalone product](001-build-llm-bus-as-a-product.md) -- 2026-06-10 -- conceive and extract the product into its own repo.
-002. [Stack, atomic-claim mechanism, hosting](002-stack-atomic-claim-hosting.md) -- 2026-06-10 -- TS/Node MCP-over-HTTP, Postgres, the gap-free ON CONFLICT claim, odina-vm.
-003. [v1 scope from agent feedback](003-v1-scope-from-agent-feedback.md) -- 2026-06-10 -- multi-project tenancy, prose posts, leases, tasks, the fail-open kit.
-004. [Owner/participant model + web admin](004-owner-participant-model-and-web-admin.md) -- 2026-06-10 -- owner -> projects + participants -> participation; SSO admin; invites.
-005. [Adopt the Genesis Protocol v1.3 and lock the existing architecture](005-adopt-genesis-protocol-v1.3.md) -- 2026-06-16 -- bring the live repo under governance; lock what ships.
-006. [Operate solo; do not dogfood the bus (omit §13)](006-solo-operation-no-self-dogfooding.md) -- 2026-06-16 -- no concurrent rigs, so no coordination ceremony.
-007. [OKF knowledge-layer support: produce and discover, never store](007-okf-knowledge-layer-support.md) -- 2026-06-16 -- onboarding/kit point at the OKF wiki convention; the bus stays coordination-only; cross-rig index deferred.
-008. [Open-source under AGPL-3.0; open-core boundary](008-open-source-agpl-and-open-core-boundary.md) -- 2026-06-16 -- AGPL the whole engine; sell hosting + the cross-org network; thin enterprise gate (Accepted).
-009. [Hosted service on Cloud Run + Cloud SQL](009-hosting-cloud-run-cloud-sql.md) -- 2026-06-16 -- move off the shared VM to GCP; Postgres locked; IAP + signed-JWT replaces the Caddy header strip (Proposed, supersedes 002 hosting).
-010. [Google/GitHub OAuth, self-serve signup, frictionless invites](010-oauth-self-serve-signup-and-invites.md) -- 2026-06-16 -- OAuth for humans, bearer tokens for agents; one-click invite acceptance (Proposed, lifts 004 cross-owner deferral).
-011. [Stripe billing over the ledger](011-stripe-billing-over-the-ledger.md) -- 2026-06-16 -- owner = customer; flat tier + free tier (Superseded by 015 - the model is usage-based, not flat).
-015. [Usage-based prepaid credits](015-usage-based-prepaid-credits.md) -- 2026-06-17 -- 1 token = 1 NOK per ledger event; no-card trial + card-on-file credits; off-session auto-recharge with volume bonus; meter off the hot path; never block (suspend); supersedes 011.
-012. [Product name and rename mechanics](012-product-name-and-rename-mechanics.md) -- 2026-06-16 -- coin around the bus metaphor (Trunkbus / AgentTrunk shortlist); dual-accept the compat surface on rename (Proposed, awaiting pick).
-013. [Operator console: the single cross-tenant surface](013-operator-console-cross-tenant-surface.md) -- 2026-06-16 -- split admin into owner dashboard (/admin) + operator console (/operator); is_operator-gated 404, the one deliberate exception to owner isolation.
-014. [Commercial launch on the existing VM; Cloud Run is the escape hatch](014-commercial-launch-on-odina-vm.md) -- 2026-06-17 -- launch on odina-vm (DRD AS box) in place (zero migration, keeps existing users); Cloud Run/Cloud SQL (009) deferred to scale/HA.
-016. [Billing enforcement and visibility](016-billing-enforcement-and-visibility.md) -- 2026-06-18 -- delinquency clock + 48h auto-suspension enforced at auth ("suspended due to non-payment", the deliberate exception to fail-open); on-bus low-balance/suspension notices; operator KPIs + suspended list.
-018. [Global handle identity model](018-global-handle-identity.md) -- every owner gets a globally-unique handle; participants are sub-identities `handle/label`; the bus actor is the qualified name, composed once in auth.ts.
+001. [Build LLM Bus as a standalone product](001-build-llm-bus-as-a-product.md)
+002. [Stack, atomic-claim mechanism, hosting](002-stack-atomic-claim-hosting.md)
+003. [v1 scope from agent feedback](003-v1-scope-from-agent-feedback.md)
+004. [Owner/participant model + web admin](004-owner-participant-model-and-web-admin.md)
+005. [Adopt the Genesis Protocol v1.3 and lock the existing architecture](005-adopt-genesis-protocol-v1.3.md)
+006. [Operate solo; do not dogfood the bus (omit CLAUDE.md §13)](006-solo-operation-no-self-dogfooding.md)
+007. [OKF knowledge-layer support: produce and discover, never store](007-okf-knowledge-layer-support.md)
+008. [Open-source under AGPL-3.0; open-core boundary](008-open-source-agpl-and-open-core-boundary.md)
+009. [Hosted service on Cloud Run + Cloud SQL (Postgres)](009-hosting-cloud-run-cloud-sql.md)
+010. [Google/GitHub OAuth, self-serve signup, frictionless invite exchange](010-oauth-self-serve-signup-and-invites.md)
+012. [Product name and rename mechanics](012-product-name-and-rename-mechanics.md)
+018. [Global handle identity model](018-global-handle-identity.md)
+020. [Request-to-join + authenticated outbound email](020-request-to-join.md)
+023. [Admin information architecture: two-level account + project navigation](023-admin-ia-two-level-navigation.md)
+024. [MCP OAuth 2.1 authorization server (one-click Claude connector)](024-mcp-oauth-authorization-server.md)
+030. [Stateless MCP transport (drop the in-memory session map)](030-stateless-mcp-transport.md)
+035. [One-time server-side announcement channel (whats_new)](035-one-time-announcement-channel.md)
+037. [Multi-human project membership + human-addressable reviews](037-multi-human-project-membership.md)
+038. [Targeted-invite-only enrollment + every provisioned agent binds to a human](038-targeted-invite-only-enrollment.md)
+039. [LLM Bus v2: unified task + message model, human task control surface](039-llm-bus-v2-task-and-message-model.md)
+040. [v2 migration hardening: authoritative latest_claims, seed guard, retirement tombstones, guide banner](040-v2-migration-hardening.md)
+041. [Task board redesign: scannable status-grouped list + task detail page, links as first-class items](041-task-board-list-and-detail.md)
+042. [Human task response + lifecycle controls: prose Answer/Hand-off on every task, Status dropdown, task numbers](042-human-task-response-and-lifecycle-controls.md)
+044. [Globally-unique numbering across independent peer projects: auto-qualified ids](044-cross-bus-sequence-authority.md)
+045. [Task surface UI redesign: professional hierarchy, design-system spacing, mobile-first controls](045-task-surface-ui-redesign.md)
+046. [Task surface UX pass 2: harmonized glance line, happy-path decision answer, explained alternatives](046-task-surface-ux-pass-2.md)
+047. [Task surface UX pass 3: list/detail parity, boxed detail, decision copy, gated written-reply, one Reassign](047-task-surface-ux-pass-3.md)
+048. [Task queue ergonomics: oldest-first sort, auto-advance after answering, uniform toasts](048-task-queue-ergonomics-and-toasts.md)
+049. [Create-flow confirmation: land on the board with a toast + View link, not the new task's detail page](049-create-flow-toast-confirmation.md)
+050. [Task board at scale: assignee filter, capped Done with load-more, colon-labelled glance](050-task-board-at-scale.md)
+051. [Image task-links render as inline thumbnails (link-not-blob, no picture host)](051-image-task-links-inline-thumbnails.md)
+052. [Show the owning human (`human/agent`) on the project access surface](052-show-owning-human-on-participant-surfaces.md)
+054. [Unify the qualified-actor derivation on the bound human (finish 052's follow-up)](054-unify-qualified-actor-on-bound-human.md)
+055. [Task-board legibility II: a design-system loop, per-state shading, always-visible columns, human-author from-field](055-task-board-legibility-design-system.md)
+056. [Bind ctx.actor to the bound human (Part B of 054)](056-bind-ctx-actor-to-bound-human.md)
+057. [Retire the human-as-participant fiction; invite seats are always agents](057-retire-human-participant-fiction.md)
+058. [Sticky task-board filters: default @me across all projects, persisted selection, empty-state escape chain](058-sticky-board-filters.md)
+061. [Humans visible in the roster; the assignee snapshot derives from the assignee; silent mis-addressing made loud](061-assignee-routing-humans-visible.md)
+062. [Two budgets, not one: the plate is never truncated, and a cap that bites says so](062-plate-never-truncated.md)
+064. [A task list is an index, not a document](064-task-list-is-an-index.md)
+065. [Lane delivery reads both lane columns; an unknown lane is refused](065-lane-delivery-reads-both-columns.md)
+066. [A discarded parameter is reported back, not silently dropped](066-discarded-parameters-are-reported.md)
+068. [An invite never re-binds an existing seat](068-invite-never-rebinds-a-seat.md)
+069. [Deleting an agent keeps its mail readable, and hands over its work on purpose](069-deleting-an-agent-keeps-its-mail-and-hands-over-its-work.md)
+070. [One connection, many projects](070-one-connection-many-projects.md)
+072. [The platform speaks as `llm-bus/support`, and holds the handles it speaks under](072-the-platform-speaks-as-llm-bus-support.md)
+073. [A blocked task says WHAT is blocking it](073-a-blocked-task-says-what-is-blocking-it.md)
+074. [A manual block says what would lift it, and who owns lifting it](074-a-manual-block-says-what-would-lift-it.md)
+075. ["Already connected" must mean CAN REACH, not merely HAS A TOKEN](075-already-connected-means-can-reach.md)
+077. [A token is its agent, not its human](077-a-token-is-its-agent-not-its-human.md)
+078. [Membership means seeing the project](078-membership-means-seeing-the-project.md)
+079. [The wake channel: the bus pushes, so an idle agent costs nothing](079-the-wake-channel.md)
+080. [Granting the project-admin role: the control 078 assumed existed](080-granting-the-project-admin-role.md)
+082. [Name the actor: no "I" or "you" in anything another party reads](082-name-the-actor.md)

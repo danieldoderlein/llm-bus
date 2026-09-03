@@ -2,11 +2,11 @@
 
 **Date:** 2026-06-16
 **Status:** Deferred (the scale/HA escape hatch). The commercial launch runs on the existing
-`odina-vm` per [014](014-commercial-launch-on-odina-vm.md); this Cloud Run + Cloud SQL design is kept
+`the deploy host` per [014](014-commercial-launch-on-the deploy host.md); this Cloud Run + Cloud SQL design is kept
 built and ready for when scale or managed-HA demands justify Cloud SQL's standing cost, not adopted
 at launch.
 
-Supersedes the hosting portion of [002](002-stack-atomic-claim-hosting.md) (the `odina-vm` /
+Supersedes the hosting portion of [002](002-stack-atomic-claim-hosting.md) (the `the deploy host` /
 systemd / Caddy arrangement) **only when the escape hatch is taken**; until then 002's VM deploy
 stands and is the launch target (014). The stack and the atomic-claim mechanism in 002 are unchanged.
 Adopting this needs the full feature pipeline (CLAUDE.md §11), a re-proof of the load-bearing
@@ -56,7 +56,7 @@ email with no valid signed assertion is rejected.
 
 ## Context
 
-Decision 002 deliberately chose a namespaced slot on the shared `odina-vm`; PLAN milestone 2 always
+Decision 002 deliberately chose a namespaced slot on the shared `the deploy host`; PLAN milestone 2 always
 flagged dedicated hosting off the shared VM as a pre-commercialization step. Commercialization needs
 isolated, self-serve, scalable hosting and a clean separation from other tenants on the VM. GCP keeps
 the DB native-Postgres (no claim rework) and offers a free compute tier (Cloud Run Always Free) plus

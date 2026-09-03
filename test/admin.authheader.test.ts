@@ -39,8 +39,12 @@ async function main(): Promise<void> {
   const ct = withHeader.headers.get("content-type") ?? "";
   check(ct.includes("text/html"), `dashboard content-type expected text/html, got "${ct}"`);
   const dashHtml = await withHeader.text();
-  check(dashHtml.includes("Dashboard"), "dashboard HTML missing 'Dashboard'");
-  check(dashHtml.includes(email), "dashboard HTML should show the owner email");
+  // A brand-new owner (no projects) gets the first-run wizard; an existing one gets the Projects home.
+  check(
+    dashHtml.includes("connect your first agent") || dashHtml.includes("+ New project"),
+    "admin HTML should render the wizard or the Projects home",
+  );
+  check(dashHtml.includes(email), "admin HTML should show the owner email");
   // A session cookie should have been issued.
   const setCookie = withHeader.headers.get("set-cookie") ?? "";
   check(/yolo_admin=/.test(setCookie), `expected a session cookie, got "${setCookie}"`);

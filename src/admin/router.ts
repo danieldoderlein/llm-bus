@@ -5,7 +5,7 @@ import type http from "node:http";
 
 const MAX_FORM_BYTES = 64 * 1024;
 
-/** Strip a single leading `prefix` (e.g. "/admin"); the bare prefix and prefix+"/"
+/** Strip a single leading `prefix` (e.g. "/admin", "/operator"); the bare prefix and prefix+"/"
  *  both become "/". A trailing slash on a deeper path is trimmed. */
 export function stripPrefix(pathname: string, prefix: string): string {
   let p = pathname;
@@ -38,6 +38,26 @@ export function matchId(pattern: string, path: string): number | null {
     }
   }
   return id;
+}
+
+/**
+ * Match a path with two numeric segments, e.g. "/projects/:id/requests/:rid/approve". Returns the
+ * captured ids (NaN if non-numeric, so the owner-scoped query then returns null and the handler 404s),
+ * or null if the shape doesn't match.
+ */
+export function matchTwoIds(pattern: string, path: string): { id: number; rid: number } | null {
+  const pp = pattern.split("/");
+  const ap = path.split("/");
+  if (pp.length !== ap.length) return null;
+  let id: number | null = null;
+  let rid: number | null = null;
+  for (let i = 0; i < pp.length; i++) {
+    if (pp[i] === ":id") id = Number(ap[i]);
+    else if (pp[i] === ":rid") rid = Number(ap[i]);
+    else if (pp[i] !== ap[i]) return null;
+  }
+  if (id === null || rid === null) return null;
+  return { id, rid };
 }
 
 /** Read and parse a small urlencoded form body. Caps size to bound memory. */

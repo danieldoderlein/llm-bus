@@ -8,7 +8,7 @@ Resolves PLAN milestone 1 (naming + clearance).
 ## Selected name (2026-06-17): LLM Bus
 
 The chosen name is **LLM Bus** (display), `llm-bus` / `llmbus` for handles, on the dedicated apex
-**`llm-bus.com`** (a standalone product domain; `llmbus.io`/`.ai` are alternatives). It deliberately
+**`example.com`** (a standalone product domain; `llmbus.io`/`.ai` are alternatives). It deliberately
 adopts the established `llm-*` naming convention (Simon Willison's `llm` CLI + its `llm-*` plugins,
 the "LLM OS" / "llm-wiki" lineage): nerdy, accurate, non-salesy, and a better fit than `agent-*` for
 an open-source dev tool. It keeps the "bus" vocabulary the product lives by ("check the bus", "on the
@@ -19,23 +19,23 @@ trademark exists or blocks us (accepted trade-off for a convention name). `llmbu
 free on npm, PyPI, and GitHub - grab them to secure the namespace. Two minor, non-blocking notes:
 (1) `TRIZZGLOBAL/llmbus` is a low-footprint LLM red-team scanner sharing the bare name in an adjacent
 category - differentiate via the "LLM Bus" styling and positioning; (2) on PyPI, `llm-bus` reads as an
-`llm` plugin (it is not one) - use a distinct package name there or grab it defensively. `llm-bus.com`
+`llm` plugin (it is not one) - use a distinct package name there or grab it defensively. `example.com`
 is available; `llmbus.com` is parked/for-sale (not a live product).
 
 **Rename timing:** do the rename cutover NOW, before the commercial launch - the name is locked and
 there are far fewer deployed clients to migrate now than post-launch, and launching commercially under
-the real brand (LLM Bus / `llm-bus.com`) beats launching as "LLM Bus/yolo" and renaming later. The
+the real brand (LLM Bus / `example.com`) beats launching as "LLM Bus/yolo" and renaming later. The
 dual-accept window below covers the existing dogfood rigs.
 
 **Cutover progress.** Phase 1 (brand/display + client-template strings: package name `@llm-bus/server`,
 healthz/log/admin brand, the `.mcp.json` key `llm-bus`, env var `LLM_BUS_TOKEN`, MCP server name
 `llm-bus`, kit contract `.llm-bus`/`llm-bus.config.json`, docs) executed 2026-06-17 with `npm run verify`
 green (15 tests); lockstep tests updated (smoke `.mcp.json` key, hook.failopen contract, admin.crud
-export line). Shipped with `PUBLIC_URL` still emitting `yolo.doderlein.com`, so no dead host. Deliberate
+export line). Shipped with `PUBLIC_URL` still emitting `yolo.example.com`, so no dead host. Deliberate
 non-renames: the `yolo` prod DB and `llm_bus` test DB (internal infra), historical decision
-filenames, the `yolo_admin` cookie. Phase 2 (host/endpoint `yolo.doderlein.com` -> `llm-bus.com`:
+filenames, the `yolo_admin` cookie. Phase 2 (host/endpoint `yolo.example.com` -> `example.com`:
 `PUBLIC_URL`/`ALLOWED_HOSTS` flip + a Caddy vhost serving both hosts with the header-strip intact +
-kit/doc endpoint literals) is the coordinated deploy step on `odina-vm`, with the old host kept alive
+kit/doc endpoint literals) is the coordinated deploy step on `the deploy host`, with the old host kept alive
 until the dogfood rigs update their `.mcp.json` url.
 
 ## Decision (the bus-metaphor rationale that led here)

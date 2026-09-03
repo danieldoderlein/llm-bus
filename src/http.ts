@@ -1,553 +1,177 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { authenticateResult } from "./auth.js";
 import { query } from "./db.js";
-import { buildServer } from "./mcp.js";
+import { buildServer, type RawCall } from "./mcp.js";
+import { PLATFORM_ACTORS_SQL } from "./platform-identity.js";
 import { handleAdmin } from "./admin/handlers.js";
 import { loadConfig } from "./config.js";
-import { redeemInvite, buildJoinFiles, coordinationGuide, buildConnectCommand } from "./invite.js";
+import { waitForWork } from "./domain/wait.js";
+import { billingEnabled, defaultVerifier } from "./billing/stripe.js";
+import { applyWebhook } from "./billing/index.js";
+import { ensureSession, getSessionEmail, getCsrf } from "./admin/session.js";
+import { oauthEnabled } from "./admin/oauth.js";
+import {
+  asIssuer,
+  authServerMetadata,
+  registerClient,
+  redeemAuthCode,
+  redeemRefreshToken,
+  type TokenGrant,
+} from "./oauth-as.js";
+import { resolveOwner } from "./admin/owner.js";
+import { readForm } from "./admin/router.js";
+import { gaHead, cookieBanner } from "./analytics.js";
+import { TOKENS } from "./brand.js";
 
 const MAX_BODY_BYTES = 1_000_000;
-const VERSION = "2.0.0-rc.0";
+// Reported by /healthz. Kept in sync with package.json by config.validation - they DRIFTED once
+// (2.0.55 shipped while /healthz still said 2.0.54), which made a SUCCESSFUL deploy read as a failed
+// one: the version string is the surface a deploy is confirmed on, so a stale one is worse than none.
+const VERSION = "2.0.55";
 
-// Marketing landing page served at `/`: Space Grotesk hero, live event ticker, animated agent demo,
-// KPI strip, and Genesis on-ramp. Static document with client-side animations; no server inputs.
-const LANDING_HTML = `<!doctype html>
+// Web analytics: GA4 via gtag.js, gated on GA_MEASUREMENT_ID. Consent Mode v2 sets analytics_storage
+// "denied" by default and the gtag.js script is NOT loaded at all until consent is granted (opt-in,
+// EEA-safe) - the cookie banner below loads it and flips consent to "granted" on accept, persisting
+// the choice in localStorage. Both strings are empty when GA_MEASUREMENT_ID is unset, so self-host/dev
+// render no analytics and no banner. The id is re-validated here against the same strict pattern as
+// config.ts (not just at boot) so only a G-XXXX value can ever reach the inline script - the value has
+// no quote/bracket characters, closing the HTML-injection surface regardless of how the env is set.
+// Analytics markup (decision 021) - the single source is src/analytics.ts. Every HTML page below
+// interpolates GA_HEAD in <head> and COOKIE_BANNER before </body>; both are "" when GA is unconfigured.
+const GA_HEAD = gaHead();
+const COOKIE_BANNER = cookieBanner();
+// G-INSTRUMENT (decision 027): the signup_start gtag event is emitted ONLY when GA is configured
+// (decision 021 - nothing analytics on self-host / dev / the open engine). The UTM params on the CTAs are
+// harmless URL params and stay unconditionally (the no-JS attribution backbone). This fires through the
+// shared gtag the chokepoint defines (not a second loader) and is consent-gated by Consent Mode v2.
+const GA_ON = GA_HEAD !== "";
+const SIGNUP_INSTRUMENT = GA_ON
+  ? `
+  (function(){
+    var v=(document.body.getAttribute('data-aud')||'everyone');
+    document.addEventListener('click',function(ev){
+      var a=ev.target.closest?ev.target.closest('a[data-cta]'):null;
+      if(!a) return;
+      if(typeof window.gtag==='function'){
+        window.gtag('event','signup_start',{cta:a.getAttribute('data-cta'),landing_variant:v});
+      }
+    },true);
+  })();`
+  : "";
+
+// Brand favicon: the simplified v3 mark (hexagon + hub + one outside node) in the teal accent so it
+// reads on both light and dark browser tab bars. Served at /favicon.svg; referenced from every <head>.
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none" stroke="#14b8a6" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M135,94.02 L174,26.5"/><circle cx="120" cy="120" r="30" fill="#14b8a6" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#14b8a6" stroke="none"/></svg>`;
+
+// Brand assets (served from /brand). The mark in its three official treatments + the "Runs on LLM Bus"
+// README badge. All hand-authored SVG, no raster deps; the badge is a flat shields-style strip.
+const MARK_DUOTONE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="LLM Bus"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z" stroke="#111315"/><path d="M135,94.02 L174,26.5" stroke="#14b8a6"/><circle cx="120" cy="120" r="30" fill="#14b8a6"/><circle cx="174" cy="26.5" r="16" fill="#14b8a6"/></svg>`;
+const MARK_MONO = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none" stroke="#111315" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="LLM Bus"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M135,94.02 L174,26.5"/><circle cx="120" cy="120" r="30" fill="#111315" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#111315" stroke="none"/></svg>`;
+const MARK_WHITE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="LLM Bus"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M135,94.02 L174,26.5"/><circle cx="120" cy="120" r="30" fill="#ffffff" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#ffffff" stroke="none"/></svg>`;
+// Badges use Verdana/DejaVu (not the decision-006 system-font token) on purpose: GitHub proxies badge
+// SVGs through camo and strips webfonts, so Verdana is the one metric that renders identically
+// everywhere - a documented exception for the badge surface only. Geometry + contrast per the marketing
+// build spec (badges-spec.md, 2026-07-10): value text is ink #111315 on teal for WCAG AA (8.4:1), the
+// mark carries teal, flat rx=4, viewBox for crisp author scaling. See BADGE RULES in src/brand.ts.
+const BADGE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 143 20" width="143" height="20" role="img" aria-label="Runs on LLM Bus"><title>Runs on LLM Bus</title><clipPath id="rr"><rect width="143" height="20" rx="4" fill="#fff"/></clipPath><g clip-path="url(#rr)"><rect width="74" height="20" fill="#111315"/><rect x="74" width="69" height="20" fill="#14b8a6"/></g><g transform="translate(6,4.2) scale(0.052)" fill="none" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z" stroke="#fff"/><path d="M135,94.02 L174,26.5" stroke="#14b8a6"/><circle cx="120" cy="120" r="30" fill="#14b8a6" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#14b8a6" stroke="none"/></g><g font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="25" y="14" fill="#fff">runs on</text><text x="108" y="14" fill="#111315" font-weight="bold" text-anchor="middle">LLM Bus</text></g></svg>`;
+// (The per-project "Request to join" badge + its /join-badge.svg asset were removed with decision 038's
+// retirement of request-to-join - the badge linked to the now-410 /p/<handle>/<slug> request page.)
+// Add-to-Claude CTA button (marketing badges-spec.md, 2026-07-10): the primary connect badge now that
+// one-click OAuth is live. "Claude" used nominatively. Links (in the /brand snippets) to the site connect
+// destination - the same target as the landing "Add to Claude" CTA (anchor finalized with the landing).
+const ADD_TO_CLAUDE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 134 28" width="134" height="28" role="img" aria-label="Add to Claude on LLM Bus"><title>Add to Claude on LLM Bus</title><rect width="134" height="28" rx="8" fill="#111315"/><g transform="translate(11,6) scale(0.0667)" fill="none" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z" stroke="#fff"/><path d="M135,94.02 L174,26.5" stroke="#14b8a6"/><circle cx="120" cy="120" r="30" fill="#14b8a6" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#14b8a6" stroke="none"/></g><g font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11.5"><text x="36" y="18.5" fill="#fff" font-weight="bold">Add to Claude</text></g></svg>`;
+
+// Own-venture proof-strip marks (marketing #814, G-LOGO cleared 2026-07-12): inline SVG so the ONE
+// `.lgc{color:var(--muted)}` rule greys them all via currentColor (uniform). Fills flattened to
+// currentColor; fixed width/height stripped so CSS sets one consistent height. CSP-safe (inline).
+
+// Public brand page served at /brand: the mark, downloads, color/type, and the README badge with
+// copy-paste snippets. Same B&W-plus-teal system as the landing/legal pages.
+
+// The public marketing landing (GET /). ONE builder -> two pre-rendered variants; the SERVER sets the body
+// class + data-aud, so both are correct with NO JS (served-surface contract). Content = marketing's
+// brand-reviewed relaunch-2026-08 (@ 9cec459), landed via src/landing-relaunch.ts (decision 060, refines
+// 027). Decision 060 retired the on-page audience TOGGLE (single page) while keeping the ?v=/aud/UTM
+// attribution backbone. Chokepoints: ${TOKENS} (026), ${gaHeadVariant}/${COOKIE_BANNER} (021).
+function landingDoc(_dev: boolean): string {
+  // The hosted service serves a marketing page here. A self-hosted bus does not need one, so this is a
+  // plain index that says what the server is and where to go. It still routes through the decision-021
+  // analytics chokepoint (inert here) and the shared token module, so adding your own page later does
+  // not mean re-plumbing anything.
+  return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLM Bus - Stop being the bridge between your agents</title>
-<meta name="description" content="The live coordination layer for AI agents and the humans driving them, so you stop being the bridge. Agents hand off, share, assign, and report on one bus over MCP. Prepaid, pay-per-action, open source.">
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
-<style>
-  :root{--ink-900:#111315;--ink-700:#2b2f36;--gray-600:#4b5159;--gray-500:#6b7178;--gray-200:#e2e5e8;--gray-100:#eef0f2;--gray-50:#f7f8f9;--white:#fff;--line:#e2e5e8;--line-strong:#c5c9ce;
-    --live:#1f9d57;
-    --accent:#14b8a6;
-    --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;--font-display:'Space Grotesk','Inter',system-ui,-apple-system,'Segoe UI',sans-serif;--font-mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
-    --s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--s8:64px;--s9:96px;color-scheme:light;}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--white);color:var(--ink-900);font-family:var(--font-sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
-  a{color:var(--ink-900);text-decoration:none}
-  .wrap{max-width:1080px;margin:0 auto;padding:0 var(--s5)}
-  .btn{display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:15px;line-height:1;padding:var(--s3) var(--s5);border-radius:8px;border:1px solid transparent;cursor:pointer}
-  .btn-primary{background:var(--ink-900);color:var(--white)}.btn-primary:hover{background:var(--ink-700)}
-  .btn-secondary{background:var(--white);color:var(--ink-900);border-color:var(--line-strong)}.btn-secondary:hover{background:var(--gray-100)}
-  .btn-lg{padding:var(--s4) var(--s6);font-size:17px}
-  .kicker{font-family:var(--font-mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--gray-500)}
-  nav{display:flex;align-items:center;gap:var(--s5);padding:var(--s4) 0;border-bottom:1px solid var(--line)}
-  nav .brand{display:inline-flex;align-items:center;gap:9px;font-family:var(--font-display);font-weight:700;letter-spacing:-.02em;font-size:17px}
-  nav .brand svg{width:24px;height:24px}
-  nav .brand .hub{fill:var(--accent)}
-  nav .links{margin-left:auto;display:flex;align-items:center;gap:var(--s5);font-size:15px}
-  nav .links a{color:var(--gray-600)}nav .links a:hover{color:var(--accent)}
-  nav .links a.btn-primary{color:var(--white)}nav .links a.btn-primary:hover{color:var(--white)}
-  .hero{padding:var(--s9) 0 var(--s7)}
-  .hero h1{font-family:var(--font-display);font-size:clamp(38px,6vw,60px);line-height:1.05;letter-spacing:-.03em;margin:var(--s4) 0;font-weight:700}
-  .dot{color:var(--accent)}
-  .hero p.lead{font-size:20px;color:var(--gray-600);max-width:56ch;margin:0 0 var(--s6)}
-  .hero .cta{display:flex;gap:var(--s3);flex-wrap:wrap}
-  .code{font-family:var(--font-mono);font-size:14px;background:var(--ink-900);color:var(--gray-100);padding:var(--s4);border-radius:8px;overflow-x:auto;margin-top:var(--s7);white-space:pre-wrap;line-height:1.5}
-  .code .c{color:var(--gray-500)}
-  section{padding:var(--s8) 0;border-top:1px solid var(--line)}
-  section h2{font-family:var(--font-display);font-size:32px;letter-spacing:-.02em;margin:0 0 var(--s3);font-weight:600}
-  section p.sub{color:var(--gray-600);max-width:60ch;margin:0 0 var(--s6);font-size:17px}
-  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--s4)}
-  .feat{border:1px solid var(--line);border-radius:12px;padding:var(--s5);transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
-  .feat:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(17,19,21,.06);border-color:var(--line-strong)}
-  .feat h3{font-size:18px;margin:0 0 6px}
-  .feat p{color:var(--gray-600);margin:0;font-size:15px}
-  .feat a{color:var(--ink-900);border-bottom:1px solid var(--line-strong)}.feat a:hover{color:var(--accent);border-bottom-color:var(--accent)}
-  .price{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s4)}
-  .price .big{font-family:var(--font-display);font-size:40px;font-weight:700;letter-spacing:-.02em}
-  ul.checks{list-style:none;padding:0;margin:0 0 var(--s5);color:var(--gray-600)}
-  ul.checks li{padding:6px 0 6px 26px;position:relative}
-  ul.checks li:before{content:"";position:absolute;left:0;top:13px;width:10px;height:6px;border-left:2px solid var(--ink-900);border-bottom:2px solid var(--ink-900);transform:rotate(-45deg)}
-  footer{border-top:1px solid var(--line);padding:var(--s7) 0;color:var(--gray-500);font-size:14px}
-  footer .row{display:flex;gap:var(--s5);flex-wrap:wrap;align-items:center}
-  footer a{color:var(--gray-600)}footer a:hover{color:var(--accent)}
-
-  /* ---- Demo window ---- */
-  .demo-band{padding:var(--s7) 0 var(--s8)}
-  .demo-grid{display:grid;grid-template-columns:1.25fr 1fr;gap:var(--s5);align-items:start}
-  .window{background:var(--ink-900);border-radius:12px;border:1px solid var(--ink-700);overflow:hidden;box-shadow:0 12px 40px rgba(17,19,21,.10)}
-  .window .titlebar{display:flex;align-items:center;gap:8px;padding:10px var(--s4);border-bottom:1px solid #20242a}
-  .window .titlebar .dot{width:11px;height:11px;border-radius:50%;background:#3a3f46}
-  .window .titlebar .label{margin-left:8px;font-family:var(--font-mono);font-size:12px;color:var(--gray-500)}
-  .term{font-family:var(--font-mono);font-size:13.5px;line-height:1.55;color:var(--gray-100);padding:var(--s4);min-height:300px;white-space:pre-wrap}
-  .term .hint{color:var(--gray-500);font-size:12px;letter-spacing:.04em;display:block;margin-bottom:6px}
-  .term .prompt{color:#fff}
-  .term .prompt .sigil{color:var(--gray-500)}
-  .term .cur{display:inline-block;width:8px;height:16px;background:var(--accent);vertical-align:-3px;margin-left:1px;animation:blink 1s step-end infinite}
-  .term .digest{color:var(--gray-500)}
-  .term .type{color:var(--live)}
-  .term .you{color:#fff}
-  .term .quote{color:var(--gray-100);display:block;padding-left:14px;border-left:2px solid #2c3138;margin:4px 0 6px}
-  .demo-caption{margin-top:var(--s4);border:1px solid var(--line);border-radius:10px;padding:var(--s4);background:var(--gray-50);font-size:15px;color:var(--ink-900);opacity:0;transform:translateY(6px);transition:opacity .5s ease,transform .5s ease}
-  .demo-caption.show{opacity:1;transform:translateY(0)}
-  .demo-caption .lead-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ink-900);margin-right:9px;vertical-align:1px}
-  .demo-side h2{font-family:var(--font-display);font-size:26px;letter-spacing:-.02em;margin:0 0 var(--s3);font-weight:600}
-  .demo-side p{color:var(--gray-600);margin:0 0 var(--s4);font-size:16px}
-  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
-
-  /* ---- Live bus band (leads the page) ---- */
-  .live-band{padding:var(--s7) 0 var(--s8)}
-  .live-head{display:flex;align-items:center;gap:12px;margin:0 0 var(--s3)}
-  .live-head .live-label{font-family:var(--font-display);font-size:28px;letter-spacing:-.02em;font-weight:600}
-  .live-sub{color:var(--gray-600);max-width:64ch;margin:0 0 var(--s5);font-size:17px}
-  .ticker-lg ul{font-size:14px;min-height:268px}
-  .ticker-lg li{padding:9px var(--s5)}
-  .ticker-lg .head{padding:12px var(--s5)}
-
-  /* ---- Connective lead-in to the agent demo ---- */
-  .demo-connect{margin:0 0 var(--s5)}
-
-  /* ---- Live ticker ---- */
-  .ticker{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:var(--s5)}
-  .ticker .head{display:flex;align-items:center;gap:10px;padding:10px var(--s4);border-bottom:1px solid var(--line);background:var(--gray-50)}
-  .ticker .live-dot,.live-head .live-dot{position:relative;width:9px;height:9px;border-radius:50%;background:var(--accent)}
-  .live-head .live-dot{width:11px;height:11px}
-  .ticker .live-dot:after,.live-head .live-dot:after{content:"";position:absolute;inset:-5px;border-radius:50%;border:1px solid var(--accent);opacity:.6;animation:pulse 1.6s ease-out infinite}
-  .ticker .head .label{font-family:var(--font-mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--gray-600)}
-  .ticker ul{list-style:none;margin:0;padding:6px 0;font-family:var(--font-mono);font-size:13px;min-height:200px}
-  .ticker li{display:grid;grid-template-columns:10px 84px 1fr auto;gap:12px;padding:6px var(--s4);color:var(--gray-600);align-items:baseline;animation:rowin .4s ease}
-  .ticker li .mark{color:var(--accent);font-weight:600}
-  .ticker li .ev{font-weight:500}
-  .ticker li .meta{color:var(--gray-500);font-size:12px;justify-self:end;white-space:nowrap}
-  .ev-post{color:var(--ink-900)}.ev-ack{color:var(--live)}.ev-claim{color:var(--ink-700)}
-  .ev-lease{color:var(--gray-600)}.ev-release{color:var(--gray-500)}.ev-register{color:var(--ink-700)}.ev-task{color:var(--ink-900)}
-  @keyframes rowin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-  @keyframes pulse{0%{transform:scale(1);opacity:.6}100%{transform:scale(2.4);opacity:0}}
-
-  /* ---- KPI strip ---- */
-  .kpi-label{font-family:var(--font-mono);font-size:12px;letter-spacing:.08em;color:var(--gray-500);margin:0 0 var(--s4)}
-  .kpis{display:grid;grid-template-columns:repeat(7,1fr);gap:var(--s3)}
-  .kpi{border:1px solid var(--line);border-radius:10px;padding:var(--s4);text-align:center;transition:transform .18s ease,border-color .18s ease}
-  .kpi:hover{transform:translateY(-2px);border-color:var(--line-strong)}
-  .kpi .num{font-size:26px;font-weight:680;letter-spacing:-.02em;line-height:1.1}
-  .kpi .cap{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--gray-500);margin-top:6px;line-height:1.3}
-  .kpi sup{font-size:.6em;color:var(--gray-500)}
-  .kpi-foot{margin-top:var(--s4);font-size:12px;color:var(--gray-500)}
-  @media(max-width:980px){.kpis{grid-template-columns:repeat(4,1fr)}}
-
-  @media(max-width:820px){.demo-grid{grid-template-columns:1fr}}
-  @media(max-width:720px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
-
-  @media (prefers-reduced-motion: reduce){
-    *,*:before,*:after{animation:none!important;transition:none!important}
-    .demo-caption{opacity:1;transform:none}
-    .term .cur{display:none}
-  }
-</style></head>
-<body>
-<div class="wrap">
-  <nav>
-    <a class="brand" href="/"><svg viewBox="0 0 240 240" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M135,94.02 L174,26.5" stroke="var(--accent)"/><circle class="hub" cx="120" cy="120" r="30" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="var(--accent)" stroke="none"/></svg>LLM&nbsp;Bus</a>
-    <div class="links"><a href="#how">How it works</a><a href="/pricing">Pricing</a><a href="https://app.llm-bus.com/admin">Sign in</a><a class="btn btn-primary" href="https://app.llm-bus.com/admin">Start free</a></div>
-  </nav>
-
-  <header class="hero">
-    <div class="kicker">Coordination for AI agents, over MCP</div>
-    <h1>Stop being the bridge<br>between your agents<span class="dot">.</span></h1>
-    <p class="lead">Run more than one agent and you become the relay - copying context between sessions and reconciling what each one did. Put them on one live bus where they ask, share, assign, and report directly, whether the work lives in git, a Drive, or nothing shared at all.</p>
-    <div class="cta">
-      <a class="btn btn-primary btn-lg" href="https://app.llm-bus.com/admin">Start free</a>
-      <a class="btn btn-secondary btn-lg" href="#how">See how it works</a>
-    </div>
-    <div class="code"><span class="c"># connect any agent in one command, then restart</span>
-claude mcp add --transport http llm-bus https://mcp.llm-bus.com/mcp \\
-  --header "Authorization: Bearer &lt;token&gt;"</div>
-  </header>
-
-  <section class="live-band" aria-label="The bus, live right now">
-    <div class="live-head">
-      <span class="live-dot"></span>
-      <span class="live-label">The bus, live right now</span>
-    </div>
-    <p class="live-sub">This is the bus in motion - agents handing off, acknowledging, claiming, leasing. The event types below are the real coordination our own agents do between independent sessions.</p>
-    <div class="ticker ticker-lg" id="ticker">
-      <div class="head"><span class="live-dot"></span><span class="label">live on the bus</span></div>
-      <ul id="ticker-list"></ul>
-    </div>
-  </section>
-
-  <section class="demo-band" aria-label="Live demo">
-    <div class="demo-connect"><span class="kicker">...and here is what your agents do with it</span></div>
-    <div class="demo-grid">
-      <div>
-        <div class="window">
-          <div class="titlebar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">agent - session 3</span></div>
-          <div class="term" id="term" aria-live="off"></div>
-        </div>
-        <div class="demo-caption" id="caption"><span class="lead-dot"></span>Your agent just learned a teammate's change would break prod - without you relaying it.</div>
-      </div>
-      <div class="demo-side">
-        <h2>See the bus do the relaying<span class="dot">.</span></h2>
-        <p>One agent checks in and the bus hands it everything that changed since last time: handoffs addressed to it, claimed numbers, active leases. No copy-paste from you.</p>
-      </div>
-    </div>
-  </section>
-
-  <section aria-label="Key numbers">
-    <p class="kpi-label">Live from the service.</p>
-    <div class="kpis" id="kpis">
-      <div class="kpi"><div class="num" data-stat="events" data-target="591" data-decimals="0">0</div><div class="cap">Events</div></div>
-      <div class="kpi"><div class="num" data-stat="posts" data-target="238" data-decimals="0">0</div><div class="cap">Handoffs</div></div>
-      <div class="kpi"><div class="num" data-stat="ackedPct" data-target="90.3" data-decimals="1" data-suffix="%">0</div><div class="cap">Acknowledged</div></div>
-      <div class="kpi"><div class="num" data-stat="anchoredPct" data-target="88" data-decimals="0" data-suffix="%">0</div><div class="cap">Anchored to an artifact</div></div>
-      <div class="kpi"><div class="num" data-stat="projects" data-target="4" data-decimals="0">0</div><div class="cap">Projects</div></div>
-      <div class="kpi"><div class="num" id="stars">-</div><div class="cap">GitHub stars</div></div>
-      <div class="kpi"><div class="num"><span id="tokens">~1.2M</span><sup>*</sup></div><div class="cap">Est. tokens saved</div></div>
-    </div>
-    <p class="kpi-foot"><sup>*</sup> estimate: <span id="tokens-basis">238</span> handoffs x ~5k tokens of re-derivation avoided each.</p>
-  </section>
-
-  <section id="how">
-    <h2>Your agents coordinate directly, not through you<span class="dot">.</span></h2>
-    <p class="sub">Agents hand off work, confirm they read it, and pull what they need from a shared record instead of routing every message through you. In 8 days of our own multi-agent runs, 77.5% of activity was handoffs and acknowledgments, 90% acknowledged.</p>
-    <div class="grid">
-      <div class="feat"><h3>Acknowledged handoffs</h3><p>Pass work to a named agent or a role, and see it actually read and confirmed. In our own runs 90% of posts were acknowledged, so knowledge lands instead of getting lost between sessions.</p></div>
-      <div class="feat"><h3>Shared ledger everyone reads</h3><p>One queryable, attributable record of what happened. Agents pull what they need instead of re-deriving it - 88% of posts in our runs were anchored to a concrete PR, ADR, or commit.</p></div>
-      <div class="feat"><h3>Gap-free numbering</h3><p>Claim the next ADR, migration, or ticket number atomically. No races, no duplicates - a claimed number can't collide.</p></div>
-      <div class="feat"><h3>File leases</h3><p>Lease a file for a multi-step edit so another agent doesn't overwrite it mid-flight. Forgotten leases lapse on their own.</p></div>
-    </div>
-  </section>
-
-  <section id="genesis" aria-label="Genesis on-ramp">
-    <div class="kicker">Before you need a bus</div>
-    <h2>You do not have a coordination problem yet. Here is how to earn one<span class="dot">.</span></h2>
-    <p class="sub">One agent, working ad hoc, is the floor. The people getting 10x work differently: they plan, divide the work across agents, review independently, and write down every decision. We open-sourced that protocol - the same one we build LLM Bus with. Adopt it, and you will outgrow a single agent fast.</p>
-    <div class="grid">
-      <div class="feat"><h3>Genesis, open and free</h3><p>The full way of working: a planning gate, an architecture lock, independent review, a decision log, and a verification gate. Drop it into any project and one improvising agent becomes a disciplined team. <a href="https://github.com/danieldoderlein/genesis-protocol">Read the Genesis protocol</a></p></div>
-      <div class="feat"><h3>You do not have to be a coder</h3><p>Coordination is not a developer thing, it is a people thing. Writers, researchers, founders, operators - anyone running agents on shared work hits the same wall. <a href="https://app.llm-bus.com/admin">Set up a project, invite a collaborator</a>, and you are coordinating, whatever your AI rig and whether or not the work touches a repo.</p></div>
-      <div class="feat"><h3>The bus catches you at the wall</h3><p>Coordinating agents by hand is the ceiling. The bus removes it - so your team of agents, and the people driving them, scales past where one person can relay.</p></div>
-    </div>
-    <div class="cta" style="display:flex;gap:var(--s3);flex-wrap:wrap;margin-top:var(--s6)">
-      <a class="btn btn-primary" href="https://app.llm-bus.com/admin">Set up a project, invite a collaborator</a>
-      <a class="btn btn-secondary" href="https://github.com/danieldoderlein/genesis-protocol">Read the Genesis protocol</a>
-    </div>
-  </section>
-
-  <section>
-    <h2>Simple, prepaid, pay-per-action<span class="dot">.</span></h2>
-    <p class="sub">No subscription. You pay only when an agent writes to the shared record its teammates rely on, and you're never blocked mid-work.</p>
-    <div class="price"><span class="big">1 token = 1 NOK</span><span class="kicker">per billable action</span></div>
-    <ul class="checks">
-      <li>Try free with no card - a starter credit to feel the benefit immediately.</li>
-      <li>Reads and presence are free; you only spend when agents write to the shared record.</li>
-      <li>Top up with volume bonuses (up to +30%); turn on auto top-up and forget it.</li>
-      <li>Prices include any applicable tax.</li>
-    </ul>
-    <a class="btn btn-secondary" href="/pricing">See full pricing</a>
-  </section>
-
-  <section>
-    <h2>Open source. Self-host or let us run it<span class="dot">.</span></h2>
-    <p class="sub">The whole engine is AGPL-3.0. Run your own instance for free, forever - the hosted service is here for when you'd rather not.</p>
-    <div class="cta" style="display:flex;gap:var(--s3);flex-wrap:wrap">
-      <a class="btn btn-primary" href="https://app.llm-bus.com/admin">Start free</a>
-      <a class="btn btn-secondary" href="https://github.com/danieldoderlein/llm-bus">View on GitHub</a>
-    </div>
-  </section>
-
-  <footer>
-    <div class="row">
-      <span>&copy; 2026 DRD AS</span>
-      <a href="/pricing">Pricing</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a>
-      <a href="https://github.com/danieldoderlein/llm-bus">GitHub</a>
-      <span style="margin-left:auto" class="kicker">AGPL-3.0</span>
-    </div>
-  </footer>
-</div>
-
-<script>
-(function(){
-  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  /* ---------- DEMO WINDOW (typewriter loop) ---------- */
-  var term = document.getElementById('term');
-  var caption = document.getElementById('caption');
-
-  // Static digest (HTML escaped), revealed after the typed prompt.
-  var digestHTML =
-    '<span class="digest">3 new since your last check</span>\\n\\n' +
-    '<span class="type">post</span>   <span class="you">bu2-dev -&gt; you</span>            <span class="digest">[vm-ops]</span>\\n' +
-    '<span class="quote">"Heads-up: your R130 merge carried my Ultra commit onto main.\\n' +
-    'Prod is still at 4b90a16, so it is NOT live yet - but the next\\n' +
-    'deploy would ship it. Hold the deploy."</span>\\n' +
-    '<span class="type">claim</span>  R132 - adr                <span class="digest">ai-claude-paul</span>\\n' +
-    '<span class="type">lease</span>  schema.prisma             <span class="digest">ai-claude-paul</span>';
-
-  var promptText = 'whats_new';
-  var hintHTML = '<span class="hint">your agent checks the bus</span>';
-  var t = [];
-  function clearTimers(){ t.forEach(clearTimeout); t = []; }
-  function wait(ms){ return new Promise(function(r){ t.push(setTimeout(r, ms)); }); }
-
-  function renderTyping(n){
-    var typed = promptText.slice(0, n);
-    term.innerHTML = hintHTML +
-      '<span class="prompt"><span class="sigil">&gt; </span>' + typed + '<span class="cur"></span></span>';
-  }
-
-  async function loop(){
-    while(true){
-      caption.classList.remove('show');
-      // type the prompt char by char
-      for(var i=0;i<=promptText.length;i++){
-        renderTyping(i);
-        await wait(95);
-      }
-      await wait(450);
-      // reveal digest
-      term.innerHTML = hintHTML +
-        '<span class="prompt"><span class="sigil">&gt; </span>' + promptText + '</span>\\n\\n' +
-        digestHTML;
-      await wait(900);
-      caption.classList.add('show');
-      await wait(3200);
-    }
-  }
-
-  if(term){
-    if(reduce){
-      // static: show fully revealed digest + caption, no animation
-      term.innerHTML = hintHTML +
-        '<span class="prompt"><span class="sigil">&gt; </span>' + promptText + '</span>\\n\\n' +
-        digestHTML;
-      caption.classList.add('show');
-    } else {
-      loop();
-    }
-  }
-
-  /* ---------- LIVE TICKER ---------- */
-  var pool = [
-    {type:'post',     body:'bu2-dev -> bu2-marketing',          meta:'handoff'},
-    {type:'ack',      body:'tablez-backend',                    meta:'read'},
-    {type:'claim',    body:'R133 - adr',                        meta:'ai-claude-paul'},
-    {type:'lease',    body:'kvad/runtime/loop.py',              meta:'bu2-dev'},
-    {type:'release',  body:'CLAUDE.md',                         meta:'ai-claude-daniel'},
-    {type:'register', body:'minter-dev - backend',             meta:'online'},
-    {type:'post',     body:'imeo-carina -> imeo-marketing',     meta:'handoff'},
-    {type:'ack',      body:'ai-claude-daniel',                  meta:'read'},
-    {type:'claim',    body:'migration 49',                      meta:'bu2-dev'},
-    {type:'lease',    body:'kvad/adapters/whatsapp/server.py',  meta:'bu2-dev'},
-    {type:'post',     body:'ai-claude-paul -> tablez-backend',  meta:'spec-review'},
-    {type:'task',     body:'ship #142',                         meta:'bu2-dev'}
-  ];
-  var list = document.getElementById('ticker-list');
-  var MAX = 7;
-
-  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function makeRow(ev){
-    var li = document.createElement('li');
-    li.innerHTML =
-      '<span class="mark">&rsaquo;</span>' +
-      '<span class="ev ev-' + ev.type + '">' + ev.type + '</span>' +
-      '<span>' + esc(ev.body) + '</span>' +
-      '<span class="meta">' + esc(ev.meta) + '</span>';
-    return li;
-  }
-  function seed(){
-    var order = pool.slice().sort(function(){ return Math.random()-0.5; }).slice(0, MAX);
-    order.forEach(function(ev){ list.appendChild(makeRow(ev)); });
-  }
-  function pushRow(){
-    var ev = pool[Math.floor(Math.random()*pool.length)];
-    list.insertBefore(makeRow(ev), list.firstChild);
-    while(list.children.length > MAX){ list.removeChild(list.lastChild); }
-  }
-  if(list){
-    seed();
-    if(!reduce){ setInterval(pushRow, 1300); }
-  }
-
-  /* ---------- KPI COUNT-UP ON SCROLL ---------- */
-  function easeOut(p){ return 1 - Math.pow(1 - p, 3); }
-  function countUp(el){
-    var target = parseFloat(el.getAttribute('data-target'));
-    var decimals = parseInt(el.getAttribute('data-decimals') || '0', 10);
-    var suffix = el.getAttribute('data-suffix') || '';
-    if(reduce){ el.textContent = target.toFixed(decimals) + suffix; return; }
-    var dur = 1200, start = null;
-    function step(ts){
-      if(start === null) start = ts;
-      var p = Math.min((ts - start) / dur, 1);
-      var val = easeOut(p) * target;
-      el.textContent = val.toFixed(decimals) + suffix;
-      if(p < 1){ requestAnimationFrame(step); }
-      else { el.textContent = target.toFixed(decimals) + suffix; }
-    }
-    requestAnimationFrame(step);
-  }
-  var kpis = document.getElementById('kpis');
-  var nums = kpis ? kpis.querySelectorAll('.num[data-target]') : [];
-  if(kpis && 'IntersectionObserver' in window){
-    var io = new IntersectionObserver(function(entries){
-      entries.forEach(function(e){
-        if(e.isIntersecting){
-          nums.forEach(countUp);
-          io.disconnect();
-        }
-      });
-    }, {threshold: 0.35});
-    io.observe(kpis);
-  } else {
-    nums.forEach(countUp);
-  }
-
-  /* ---------- GITHUB STARS (graceful fallback) ---------- */
-  var starsEl = document.getElementById('stars');
-  if(starsEl){
-    fetch('https://api.github.com/repos/danieldoderlein/llm-bus')
-      .then(function(r){ if(!r.ok) throw new Error('bad'); return r.json(); })
-      .then(function(d){
-        if(d && typeof d.stargazers_count === 'number'){
-          starsEl.textContent = d.stargazers_count.toLocaleString('en-US');
-        } else { starsEl.textContent = '-'; }
-      })
-      .catch(function(){ starsEl.textContent = '-'; });
-  }
-
-  /* ---------- LIVE STATS (graceful fallback to hardcoded) ---------- */
-  function fmtStat(el, val){
-    var decimals = parseInt(el.getAttribute('data-decimals') || '0', 10);
-    var suffix = el.getAttribute('data-suffix') || '';
-    return Number(val).toFixed(decimals) + suffix;
-  }
-  fetch('/api/stats')
-    .then(function(r){ if(!r.ok) throw new Error('bad'); return r.json(); })
-    .then(function(s){
-      if(!s || typeof s !== 'object') return;
-      var keys = ['events','posts','ackedPct','anchoredPct','projects'];
-      keys.forEach(function(k){
-        if(typeof s[k] !== 'number') return;
-        var el = document.querySelector('.num[data-stat="' + k + '"]');
-        if(!el) return;
-        el.setAttribute('data-target', String(s[k]));
-        el.textContent = fmtStat(el, s[k]);
-      });
-      var tokEl = document.getElementById('tokens');
-      if(tokEl && typeof s.tokensSaved === 'number'){
-        var n = s.tokensSaved;
-        tokEl.textContent = '~' + (n >= 1e6 ? (n/1e6).toFixed(1) + 'M' : Math.round(n/1e3) + 'k');
-      }
-      var basisEl = document.getElementById('tokens-basis');
-      if(basisEl && typeof s.posts === 'number'){ basisEl.textContent = String(s.posts); }
-    })
-    .catch(function(){});
-})();
-</script>
-</body></html>`;
-// ── Legal pages (/terms /privacy /pricing): render the docs/legal/*.md through the design system. ──
-const LEGAL_SLUGS: Record<string, string> = { terms: "Terms of Service", privacy: "Privacy Policy", pricing: "Pricing" };
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+<title>LLM Bus</title>
+${gaHead()}
+<style>${TOKENS}
+  body{font:16px/1.6 var(--font);color:var(--ink);background:var(--bg);margin:0;padding:3rem 1.25rem}
+  main{max-width:38rem;margin:0 auto}
+  h1{font-size:1.6rem;margin:0 0 .25rem}
+  p.sub{color:var(--ink-soft);margin:0 0 2rem}
+  code{font-family:var(--mono);background:var(--bg-soft);padding:.15em .4em;border-radius:4px}
+  a{color:var(--accent)}
+  ul{padding-left:1.1rem}
+</style>
+</head>
+<body><main>
+<h1>LLM Bus</h1>
+<p class="sub">A coordination server for AI agents, over MCP. This instance is self-hosted.</p>
+<ul>
+  <li><a href="/admin">Admin</a> - projects, agents, invites, and the task board.</li>
+  <li><code>/mcp</code> - the MCP endpoint. Agents connect here with a bearer token.</li>
+  <li><code>/healthz</code> - liveness.</li>
+</ul>
+<p>Source and self-hosting guide: <a href="https://github.com/danieldoderlein/llm-bus">github.com/danieldoderlein/llm-bus</a></p>
+</main>${cookieBanner()}</body></html>`;
 }
-/** Minimal Markdown -> HTML for the trusted legal docs (headings, lists, tables, bold, code, links). */
-function mdToHtml(md: string): string {
-  const inline = (s: string): string =>
-    escHtml(s)
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-  const lines = md.split(/\r?\n/);
-  const out: string[] = [];
-  let inList = false;
-  const closeList = (): void => {
-    if (inList) {
-      out.push("</ul>");
-      inList = false;
-    }
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[-:\s|]+\|\s*$/.test(lines[i + 1])) {
-      closeList();
-      const cells = (r: string): string[] => r.split("|").slice(1, -1).map((c) => c.trim());
-      out.push("<table><thead><tr>" + cells(line).map((h) => `<th>${inline(h)}</th>`).join("") + "</tr></thead><tbody>");
-      i += 2;
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
-        out.push("<tr>" + cells(lines[i]).map((c) => `<td>${inline(c)}</td>`).join("") + "</tr>");
-        i++;
-      }
-      i--;
-      out.push("</tbody></table>");
-      continue;
-    }
-    const h = line.match(/^(#{1,3})\s+(.*)$/);
-    if (h) {
-      closeList();
-      out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
-      continue;
-    }
-    const li = line.match(/^\s*-\s+(.*)$/);
-    if (li) {
-      if (!inList) {
-        out.push("<ul>");
-        inList = true;
-      }
-      out.push(`<li>${inline(li[1])}</li>`);
-      continue;
-    }
-    if (line.trim() === "") {
-      closeList();
-      continue;
-    }
-    closeList();
-    out.push(`<p>${inline(line)}</p>`);
-  }
-  closeList();
-  return out.join("\n");
-}
+const LANDING_EVERYONE = landingDoc(false);
+const LANDING_DEV = landingDoc(true);
 
-/** Render a legal page (or null if the slug/file is missing). Same B&W system as the landing. */
-function renderLegal(slug: string): string | null {
-  if (!(slug in LEGAL_SLUGS)) return null;
-  let md: string;
-  try {
-    md = readFileSync(path.join(process.cwd(), "docs/legal", `${slug}.md`), "utf8");
-  } catch {
-    return null;
-  }
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>${LEGAL_SLUGS[slug]} - LLM Bus</title>
+// Styled public 404 (task #69, harmonization #810/#811): an unknown web path used to return the bare
+// JSON {error:"not found"}, which reads as broken in a browser. This mirrors the public web shell (same
+// nav + Sora + footer as the legal pages) and carries the analytics chokepoint (GA_HEAD/COOKIE_BANNER,
+// decision 021). Static, so it is a module constant; served only to HTML-accepting GETs (API clients
+// keep the JSON error). HEAD is normalized to GET above, so it gets these headers with no body.
+const WEB_404_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Page not found - LLM Bus</title>
+${GA_HEAD}
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
-  :root{--ink:#111315;--g6:#4b5159;--g5:#6b7178;--g1:#eef0f2;--line:#e2e5e8;--sans:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono',ui-monospace,monospace}
-  *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:720px;margin:0 auto;padding:0 24px}
+  ${TOKENS}
+  *{box-sizing:border-box}html,body{overflow-x:hidden}
+  body{margin:0;background:#fff;color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;min-height:100vh}
+  .wrap{max-width:720px;margin:0 auto;padding:0 24px;width:100%}
   nav{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid var(--line)}
-  nav a.brand{display:inline-flex;align-items:center;gap:9px;font-weight:650;font-size:17px;color:var(--ink);text-decoration:none}
+  nav a.brand{display:inline-flex;align-items:center;gap:9px;font-family:var(--font-display);font-weight:700;font-size:17px;color:var(--ink);text-decoration:none}
   nav a.brand svg{width:24px;height:24px}nav .sp{margin-left:auto}nav a.home{color:var(--g6);font-size:15px;text-decoration:none}
-  main{padding:48px 0 64px}
-  h1{font-size:34px;letter-spacing:-.02em;margin:0 0 24px}
-  h2{font-size:22px;letter-spacing:-.01em;margin:40px 0 12px}
-  h3{font-size:18px;margin:28px 0 8px}
-  p,li{color:var(--g6)}p{margin:0 0 16px}ul{margin:0 0 16px;padding-left:22px}li{margin:4px 0}
-  strong{color:var(--ink)}a{color:var(--ink)}
-  code{font-family:var(--mono);font-size:.9em;background:var(--g1);padding:1px 5px;border-radius:3px}
-  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:15px}
-  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
-  th{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--g5)}
+  main{flex:1;display:flex;align-items:center;justify-content:center;padding:64px 0}
+  .card{text-align:center;max-width:34rem}
+  .code{font-family:var(--mono);font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--g5)}
+  h1{font-family:var(--font-display);font-size:38px;letter-spacing:-.02em;margin:12px 0 12px;color:var(--ink)}
+  p{color:var(--g6);margin:0 0 28px}
+  .btn{display:inline-flex;align-items:center;gap:8px;background:var(--teal-600);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;text-decoration:none}
+  .btn:hover{filter:brightness(1.05);text-decoration:none}
   footer{border-top:1px solid var(--line);padding:32px 0;color:var(--g5);font-size:14px}
   footer a{color:var(--g6)}
-</style></head><body><div class="wrap">
-<nav><a class="brand" href="/"><svg viewBox="0 0 240 240" fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M154.34,60.53 L177.58,20.29"/><path d="M115.34,83.05 L68.87,83.05"/><path d="M154.34,105.57 L177.58,145.81"/><circle cx="141.34" cy="83.05" r="20"/><circle cx="177.58" cy="20.29" r="16" fill="currentColor" stroke="none"/><circle cx="68.87" cy="83.05" r="16" fill="currentColor" stroke="none"/><circle cx="177.58" cy="145.81" r="16" fill="currentColor" stroke="none"/></svg>LLM&nbsp;Bus</a><span class="sp"></span><a class="home" href="/">Home</a></nav>
-<main>${mdToHtml(md)}</main>
-<footer>&copy; 2026 DRD AS &nbsp;&middot;&nbsp; <a href="/terms">Terms</a> &middot; <a href="/privacy">Privacy</a> &middot; <a href="/pricing">Pricing</a></footer>
-</div></body></html>`;
-}
+</style></head><body>
+<div class="wrap"><nav><a class="brand" href="/"><svg viewBox="0 0 240 240" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M120,24 L203.14,72 L203.14,168 L120,216 L36.86,168 L36.86,72 Z"/><path d="M135,94.02 L174,26.5" stroke="#14b8a6"/><circle cx="120" cy="120" r="30" fill="#14b8a6" stroke="none"/><circle cx="174" cy="26.5" r="16" fill="#14b8a6" stroke="none"/></svg>LLM&nbsp;Bus</a><span class="sp"></span><a class="home" href="/">Home</a></nav></div>
+<main><div class="wrap"><div class="card">
+  <div class="code">404</div>
+  <h1>Page not found</h1>
+  <p>That page doesn't exist - it may have moved or the link was mistyped. Head back home to pick up where you left off.</p>
+  <a class="btn" href="/">Back to home</a>
+</div></div></main>
+${COOKIE_BANNER}
+</body></html>`;
 
-const SESSION_TTL_MS = 10 * 60 * 1000;
-const SESSION_SWEEP_MS = 60 * 1000;
-const MAX_SESSIONS = 2000;
+// Stateless MCP transport (decision 030): no session state is kept, so there is no session TTL or cap.
+// The sweep interval below only expires the public rate-limit windows.
+const RATE_SWEEP_MS = 60 * 1000;
 
 // Per-IP rate limit for the public, unauthenticated POST /join (invite redemption).
 const JOIN_WINDOW_MS = 5 * 60 * 1000;
@@ -576,15 +200,6 @@ const allowedHosts = process.env.ALLOWED_HOSTS?.split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-interface Session {
-  transport: StreamableHTTPServerTransport;
-  participationId: number;
-  projectId: number;
-  lastSeen: number;
-}
-
-const sessions = new Map<string, Session>();
-
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -596,6 +211,47 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
   if (chunks.length === 0) return undefined;
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw.length ? JSON.parse(raw) : undefined;
+}
+
+/** Read an OAuth /token body as key/value params. Standard is form-urlencoded; some clients send
+ *  JSON, so accept either. Bounded by MAX_BODY_BYTES via readRawBody. */
+async function readTokenParams(req: http.IncomingMessage): Promise<URLSearchParams> {
+  const raw = (await readRawBody(req)).toString("utf8");
+  const ct = String(req.headers["content-type"] ?? "");
+  if (ct.includes("application/json")) {
+    const out = new URLSearchParams();
+    const o = raw ? JSON.parse(raw) : {};
+    if (o && typeof o === "object") {
+      for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+        if (typeof v === "string") out.set(k, v);
+      }
+    }
+    return out;
+  }
+  return new URLSearchParams(raw);
+}
+
+/** Shape the public token response (drops the internal participationId from the grant). */
+function tokenResponse(g: TokenGrant): Record<string, unknown> {
+  return {
+    access_token: g.access_token,
+    token_type: g.token_type,
+    expires_in: g.expires_in,
+    refresh_token: g.refresh_token,
+    scope: g.scope,
+  };
+}
+
+/** Read the body as RAW bytes (no JSON parse) - required for Stripe webhook signature verification. */
+async function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += (chunk as Buffer).length;
+    if (total > MAX_BODY_BYTES) throw new Error("request body too large");
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 function send(
@@ -626,6 +282,11 @@ let statsCachedAt = 0;
 async function getLiveStats(): Promise<LiveStats> {
   const now = Date.now();
   if (statsCache && now - statsCachedAt < STATS_TTL_MS) return statsCache;
+  // When STATS_OWNER_EMAIL is set, scope every count to that owner's projects (our own dogfooding usage);
+  // $1 IS NULL keeps the cross-tenant aggregate for self-host / the open engine. `scope` is the set of
+  // project ids in view. Parameterized; a missing/unknown email yields an empty scope (all zeros), never
+  // a leak of another tenant's data.
+  const ownerEmail = loadConfig().STATS_OWNER_EMAIL ?? null;
   const result = await query<{
     projects: string;
     participants: string;
@@ -634,13 +295,20 @@ async function getLiveStats(): Promise<LiveStats> {
     acked_pct: string | null;
     anchored_pct: string | null;
   }>(
-    `SELECT
-       (SELECT count(*) FROM projects) AS projects,
-       (SELECT count(*) FROM participants) AS participants,
-       (SELECT count(*) FROM events WHERE actor_name <> 'billing') AS events,
-       (SELECT count(*) FROM posts WHERE from_actor_name <> 'billing') AS posts,
-       (SELECT round(100.0*count(*) FILTER (WHERE EXISTS(SELECT 1 FROM post_acks a WHERE a.post_id=p.id))/nullif(count(*),0),1) FROM posts p WHERE p.from_actor_name <> 'billing') AS acked_pct,
-       (SELECT round(100.0*count(*) FILTER (WHERE ref IS NOT NULL)/nullif(count(*),0),0) FROM posts WHERE from_actor_name <> 'billing') AS anchored_pct`,
+    `WITH scope AS (
+       SELECT id FROM projects
+        WHERE $1::text IS NULL OR owner_id = (SELECT id FROM owners WHERE lower(email) = lower($1))
+     )
+     SELECT
+       (SELECT count(*) FROM scope) AS projects,
+       (SELECT count(*) FROM participations pa WHERE pa.project_id IN (SELECT id FROM scope)) AS participants,
+       (SELECT count(*) FROM events WHERE project_id IN (SELECT id FROM scope) AND actor_name NOT IN ${PLATFORM_ACTORS_SQL}) AS events,
+       (SELECT count(*) FROM posts WHERE project_id IN (SELECT id FROM scope) AND from_actor_name NOT IN ${PLATFORM_ACTORS_SQL}) AS posts,
+       (SELECT round(100.0*count(*) FILTER (WHERE EXISTS(SELECT 1 FROM post_reads a WHERE a.post_id=p.id))/nullif(count(*),0),1)
+          FROM posts p WHERE p.project_id IN (SELECT id FROM scope) AND p.from_actor_name NOT IN ${PLATFORM_ACTORS_SQL}) AS acked_pct,
+       (SELECT round(100.0*count(*) FILTER (WHERE ref IS NOT NULL)/nullif(count(*),0),0)
+          FROM posts WHERE project_id IN (SELECT id FROM scope) AND from_actor_name NOT IN ${PLATFORM_ACTORS_SQL}) AS anchored_pct`,
+    [ownerEmail],
   );
   const r = result.rows[0];
   const posts = Number(r.posts);
@@ -662,44 +330,79 @@ async function getLiveStats(): Promise<LiveStats> {
  * HTTP surface:
  *   GET  /healthz   -> unauthenticated liveness
  *   POST /mcp       -> MCP over Streamable HTTP; bearer-auth -> Ctx {actor, workspace} on every request
- *   GET/DELETE /mcp -> MCP session stream / teardown (auth + session-scoped)
+ *   GET/DELETE /mcp -> 405 (stateless transport has no session stream to open or tear down)
  *
- * A session is created only by a POST initialize, bound to (actor, workspace); later
- * requests must present a token resolving to the same actor. Idle sessions are reaped
- * and the total is capped to bound memory.
+ * Stateless (decision 030): each POST /mcp is handled by a fresh transport + server bound to the
+ * token-resolved ctx, then torn down. No session is kept in memory, so a deploy/restart or an idle gap
+ * never bricks a connected agent - the next request just re-authenticates and works. Identity is derived
+ * from the token on every request (invariant 1).
  */
 export function createHttpServer(): http.Server {
   const sweeper = setInterval(() => {
     const now = Date.now();
-    for (const [sid, s] of sessions) {
-      if (now - s.lastSeen > SESSION_TTL_MS) {
-        sessions.delete(sid);
-        void Promise.resolve(s.transport.close()).catch(() => {});
-      }
-    }
     for (const [ip, w] of joinHits) if (now > w.resetAt) joinHits.delete(ip);
-  }, SESSION_SWEEP_MS);
+  }, RATE_SWEEP_MS);
   sweeper.unref();
 
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
 
-      if (req.method === "GET" && url.pathname === "/") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        return res.end(LANDING_HTML);
+      // HEAD: serve it like the matching GET (same status + headers) but never emit a body, per HTTP
+      // semantics. Routes only match "GET", so a raw HEAD used to fall through to 404 (broke uptime
+      // monitors and link-preview crawlers). Route as GET and drop the body at res.end.
+      if (req.method === "HEAD") {
+        req.method = "GET";
+        const realEnd = res.end.bind(res);
+        res.end = function (chunk?: unknown, enc?: unknown, cb?: unknown) {
+          const callback = typeof chunk === "function" ? chunk : typeof enc === "function" ? enc : cb;
+          return realEnd(typeof callback === "function" ? (callback as () => void) : undefined);
+        } as typeof res.end;
       }
 
-      if (req.method === "GET" && (url.pathname === "/terms" || url.pathname === "/privacy" || url.pathname === "/pricing")) {
-        const html = renderLegal(url.pathname.slice(1));
-        if (html) {
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          return res.end(html);
+      if (req.method === "GET" && url.pathname === "/") {
+        // Landing variant attribution (decision 027, retained by 060): ?v=everyone|dev selects a variant and
+        // persists it in an `aud` cookie; a return visit without ?v reads the cookie. DEFAULT is everyone (dev
+        // only on an explicit ?v=dev or aud=dev). Decision 060 retired the on-page toggle (single brand-reviewed
+        // page), so the two variants now serve IDENTICAL content and differ only in the gaHead landing_variant
+        // dimension + the CTA UTM - i.e. ?v= is now write-only campaign attribution, not a content A/B.
+        const v = url.searchParams.get("v");
+        const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8" };
+        let dev: boolean;
+        if (v === "everyone" || v === "dev") {
+          dev = v === "dev";
+          headers["set-cookie"] = `aud=${v}; Path=/; Max-Age=31536000; SameSite=Lax; Secure`;
+        } else {
+          dev = /(?:^|;\s*)aud=dev(?:\s*;|\s*$)/.test(req.headers.cookie ?? "");
         }
+        res.writeHead(200, headers);
+        return res.end(dev ? LANDING_DEV : LANDING_EVERYONE);
       }
+
 
       if (req.method === "GET" && url.pathname === "/healthz") {
         return send(res, 200, { ok: true, service: "llm-bus", version: VERSION });
+      }
+
+      // Brand favicon: the v3 mark in teal (theme-agnostic, visible on light and dark tab bars).
+      if (req.method === "GET" && url.pathname === "/favicon.svg") {
+        res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+        return res.end(FAVICON_SVG);
+      }
+
+      {
+        const svgAsset: Record<string, string> = {
+          "/brand/mark.svg": MARK_DUOTONE,
+          "/brand/mark-mono.svg": MARK_MONO,
+          "/brand/mark-white.svg": MARK_WHITE,
+          "/badge.svg": BADGE_SVG,
+          "/add-to-claude.svg": ADD_TO_CLAUDE_SVG,
+        };
+        const asset = svgAsset[url.pathname];
+        if (req.method === "GET" && asset) {
+          res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+          return res.end(asset);
+        }
       }
 
       // Public, cached aggregate KPI counts for the landing page (60s in-memory cache).
@@ -712,18 +415,132 @@ export function createHttpServer(): http.Server {
         }
       }
 
-      // OAuth 2.0 Protected Resource Metadata (RFC 9728). Forward-compat for MCP clients that do the
-      // OAuth discovery dance; existing bearer clients never read this. authorization_servers is
-      // empty until a hosted authorization server is added (decision 010).
+      // ── The wake channel (decision 079) ──────────────────────────────────────────────────────────
+      // GET /api/wait, bearer-authorized like any MCP call. Holds the request open until THIS caller's
+      // own queue is non-empty, then answers with counts only - never content, so the agent still has to
+      // read the board and the bus never grows a second inbox.
+      //
+      // NOT an MCP tool, deliberately: a tool call happens inside a turn and would block it. This is
+      // meant to be held by a detached process while no turn is running at all.
+      //
+      // The cap is short (60s default, 300s ceiling) and that is not a compromise - re-arming costs an
+      // HTTP round trip, not a model turn, so a client loops cheaply and still sleeps indefinitely. Short
+      // windows also keep proxies, NAT and sleeping laptops from leaving half-open sockets that look
+      // exactly like a live listener.
+      if (req.method === "GET" && url.pathname === "/api/wait") {
+        const auth = await authenticateResult(req.headers.authorization);
+        if (!auth.ok) {
+          // Same shape as every other refusal here: never an existence oracle (invariant 1).
+          return send(res, auth.reason === "suspended" ? 402 : 401, { error: auth.reason });
+        }
+        const raw = Number(url.searchParams.get("timeout") ?? "60");
+        const seconds = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 1), 300) : 60;
+        try {
+          const r = await waitForWork(auth.ctx, seconds * 1000);
+          return send(res, 200, {
+            work: r.work,
+            tasks: r.tasks,
+            unread: r.unread,
+            unassigned: r.unassigned,
+            project: auth.ctx.project.slug,
+            actor: auth.ctx.actor,
+            waited_seconds: seconds,
+          });
+        } catch (err) {
+          // Fail LOUD here, unlike most of this file. A wait endpoint that quietly returns "nothing"
+          // when its channel is broken is indistinguishable from a quiet bus, and the client would sleep
+          // forever believing it was listening. 503 tells the caller to fall back to polling.
+          console.error("[llm-bus] wait error:", err);
+          return send(res, 503, { error: "wake channel unavailable" });
+        }
+      }
+
+      // OAuth 2.0 Protected Resource Metadata (RFC 9728). Points MCP clients at our authorization
+      // server (decision 024); existing bearer clients never read this. authorization_servers is
+      // empty when the AS is off (self-host / header mode), so nothing advertises a dead endpoint.
       if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
-        const base = loadConfig().PUBLIC_URL.replace(/\/+$/, "");
-        return send(res, 200, {
-          resource: base,
-          authorization_servers: [],
-          bearer_methods_supported: ["header"],
+        const cfg = loadConfig();
+        const base = cfg.PUBLIC_URL.replace(/\/+$/, "");
+        // Public discovery metadata (identical for everyone, meant to be crawled) - CORS-open so
+        // browser-based MCP clients can read it.
+        return send(
+          res,
+          200,
+          {
+            resource: base,
+            authorization_servers: oauthEnabled(cfg) ? [asIssuer(cfg)] : [],
+            bearer_methods_supported: ["header"],
+          },
+          { "access-control-allow-origin": "*" },
+        );
+      }
+
+      // OAuth 2.1 authorization-server metadata (RFC 8414). Only served when the AS is enabled
+      // (ADMIN_AUTH_SOURCE=oauth); a self-host without SSO 404s so no dead AS is advertised.
+      if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
+        const cfg = loadConfig();
+        if (!oauthEnabled(cfg)) return send(res, 404, { error: "not_found" });
+        return send(res, 200, authServerMetadata(cfg), { "access-control-allow-origin": "*" });
+      }
+
+      // Dynamic Client Registration (RFC 7591): a public PKCE client registers its redirect_uris and
+      // gets a client_id. Rate-limited (shares the per-IP join bucket). AS-enabled only.
+      if (req.method === "POST" && url.pathname === "/register") {
+        const cfg = loadConfig();
+        if (!oauthEnabled(cfg)) return send(res, 404, { error: "not_found" });
+        if (!allowJoin(clientIp(req))) return send(res, 429, { error: "rate limited; try again shortly" });
+        let body: unknown;
+        try {
+          body = await readBody(req);
+        } catch {
+          return send(res, 400, { error: "invalid_client_metadata", error_description: "unreadable body" });
+        }
+        const r = await registerClient(body);
+        if (!r.ok) return send(res, 400, { error: r.error, error_description: r.error_description });
+        return send(res, 201, {
+          client_id: r.client.client_id,
+          redirect_uris: r.client.redirect_uris,
+          ...(r.client.client_name ? { client_name: r.client.client_name } : {}),
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
         });
       }
 
+      // Token endpoint: authorization_code exchange (with PKCE) + refresh rotation. Rate-limited,
+      // never cached. AS-enabled only.
+      if (req.method === "POST" && url.pathname === "/token") {
+        const cfg = loadConfig();
+        if (!oauthEnabled(cfg)) return send(res, 404, { error: "not_found" });
+        if (!allowJoin(clientIp(req))) return send(res, 429, { error: "rate limited; try again shortly" });
+        const nostore = { "cache-control": "no-store", pragma: "no-cache" };
+        let params: URLSearchParams;
+        try {
+          params = await readTokenParams(req);
+        } catch {
+          return send(res, 400, { error: "invalid_request" }, nostore);
+        }
+        const grantType = params.get("grant_type");
+        const clientId = params.get("client_id") ?? "";
+        if (grantType === "authorization_code") {
+          const r = await redeemAuthCode(
+            params.get("code") ?? "",
+            clientId,
+            params.get("redirect_uri") ?? "",
+            params.get("code_verifier") ?? "",
+          );
+          if (!r.ok) return send(res, 400, { error: r.error }, nostore);
+          return send(res, 200, tokenResponse(r.grant), nostore);
+        }
+        if (grantType === "refresh_token") {
+          const r = await redeemRefreshToken(params.get("refresh_token") ?? "", clientId);
+          if (!r.ok) return send(res, 400, { error: r.error }, nostore);
+          return send(res, 200, tokenResponse(r.grant), nostore);
+        }
+        return send(res, 400, { error: "unsupported_grant_type" }, nostore);
+      }
+
+      // Public notification settings + one-click unsubscribe (decision 025), reached from an emailed
       // Web admin (SSO-gated by Caddy/oauth2-proxy; trusts the email header it sets).
       if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
         await handleAdmin(req, res);
@@ -732,41 +549,70 @@ export function createHttpServer(): http.Server {
 
       // Public invite redemption: unauthenticated, scoped + rate-limited by the code + per-IP.
       if (url.pathname === "/join" && req.method === "POST") {
+        // Decision 037: the open paste-a-code join path is RETIRED. Every collaborator joins by accepting an
+        // emailed invite and signing in (SSO), so their agent binds to THEIR own identity and they become a
+        // project member. create_invite (or the owner's Access page) sends a targeted /accept invite.
         const ip = clientIp(req);
         if (!allowJoin(ip)) return send(res, 429, { error: "rate limited; try again shortly" });
-        const body = (await readBody(req)) as { code?: unknown; name?: unknown } | undefined;
-        const code = typeof body?.code === "string" ? body.code.trim() : "";
-        const rawName = typeof body?.name === "string" ? body.name.trim() : "";
-        // Guard the unsubstituted placeholder so the agent gets a clear "name_required" not a bad name.
-        const name = rawName && rawName !== "<YOUR_NAME>" ? rawName : null;
-        if (!code) return send(res, 400, { error: "code required" });
-        const r = await redeemInvite(code, name);
-        if (!r.ok) {
-          const status =
-            r.error === "name_required" ? 400 : r.error === "name_taken" ? 409 : r.error === "invalid" ? 404 : 410;
-          return send(res, status, { ok: false, error: r.error });
-        }
-        const mcpUrl = loadConfig().PUBLIC_URL.replace(/\/+$/, "") + "/mcp";
-        return send(res, 200, {
-          ok: true,
-          project: r.projectSlug,
-          project_name: r.projectName,
-          participant: r.participant,
-          created: r.created,
-          token: r.token,
-          connect_command: buildConnectCommand(r.token, mcpUrl),
-          files: buildJoinFiles(r.token, mcpUrl),
-          guide: coordinationGuide(r.isAdmin),
-          next:
-            "RECOMMENDED: run `connect_command` (your token is already in it), then `claude mcp list` " +
-            "to see `llm-bus ... Connected`, then RESTART your session (MCP loads only at startup) and " +
-            "call whoami. FALLBACK (not Claude Code): write `files` to disk and set LLM_BUS_TOKEN or the " +
-            "server won't connect. Append `guide` to this repo's CLAUDE.md.",
+        return send(res, 410, {
+          ok: false,
+          error: "join_by_invite",
+          message:
+            "Open join codes are retired. Ask the project owner to invite you by email; you will get a " +
+            "sign-in link (/accept) that connects your agent under your own identity.",
         });
       }
 
+      // Request-to-join is RETIRED (decision 038, reversing the open-enrollment part of 020): enrollment is
+      // targeted-invite-only. The old public request pages (/p/:handle/:slug and .../request) now 410 with a
+      // pointer to the email-invite path, mirroring /join above. The join_requests table is retained (dormant)
+      // for history; no live path reads or writes it.
+      if (/^\/p\/[^/]+\/[^/]+(\/request)?\/?$/.test(url.pathname)) {
+        const ip = clientIp(req);
+        if (!allowJoin(ip)) return send(res, 429, { error: "rate limited; try again shortly" });
+        return send(res, 410, {
+          ok: false,
+          error: "join_by_invite",
+          message:
+            "Request-to-join is retired. Ask the project owner to invite you by email; you will get a " +
+            "sign-in link (/accept) that connects your agent under your own identity and makes you a member.",
+        });
+      }
+
+      // Stripe webhook (decision 011): Stripe signs it (no bearer auth); raw body required for
+      // constructEvent; idempotent via the stripe_events table. Fail-closed on a bad signature.
+      if (url.pathname === "/webhooks/stripe" && req.method === "POST") {
+        const cfg = loadConfig();
+        const verify = defaultVerifier(cfg);
+        if (!billingEnabled(cfg) || !cfg.STRIPE_WEBHOOK_SECRET || !verify) {
+          return send(res, 503, { error: "billing disabled" });
+        }
+        const sig = req.headers["stripe-signature"];
+        if (typeof sig !== "string") return send(res, 400, { error: "missing signature" });
+        const raw = await readRawBody(req);
+        let event: unknown;
+        try {
+          event = verify(raw, sig, cfg.STRIPE_WEBHOOK_SECRET);
+        } catch {
+          return send(res, 400, { error: "bad signature" });
+        }
+        try {
+          await applyWebhook(event);
+        } catch (err) {
+          console.error("[llm-bus] stripe webhook apply error:", err);
+          return send(res, 500, { error: "apply failed" }); // Stripe retries; idempotency makes it safe
+        }
+        return send(res, 200, { received: true });
+      }
 
       if (url.pathname !== "/mcp") {
+        // A browser (HTML-accepting GET) gets the styled 404 page through the web shell + analytics
+        // chokepoint; API/MCP clients keep the machine-readable JSON error. HEAD was normalized to GET
+        // above, so it receives these headers with no body.
+        if (req.method === "GET" && (req.headers["accept"] ?? "").includes("text/html")) {
+          res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+          return res.end(WEB_404_HTML);
+        }
         return send(res, 404, { error: "not found" });
       }
 
@@ -783,49 +629,47 @@ export function createHttpServer(): http.Server {
       }
       const ctx = auth.ctx;
 
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (sessionId) {
-        const session = sessions.get(sessionId);
-        if (!session) return send(res, 404, { error: "unknown session" });
-        if (session.participationId !== ctx.participation.id) return send(res, 403, { error: "forbidden" });
-        session.lastSeen = Date.now();
-        const body = req.method === "POST" ? await readBody(req) : undefined;
-        await session.transport.handleRequest(req, res, body);
-        return;
-      }
-
+      // Stateless transport (decision 030): a FRESH transport + server per POST, bound to the
+      // token-resolved ctx, torn down when the response closes. No session id is issued and nothing is
+      // kept in memory, so a deploy/restart or a >10-min idle gap never bricks a connected agent - the
+      // next request just works. Every request already re-authenticates and rebuilds ctx, and the server
+      // sends no server-initiated notifications, so a durable session bought nothing. GET/DELETE have no
+      // session stream to open or tear down in stateless mode.
       if (req.method !== "POST") {
-        return send(res, 400, { error: "missing mcp-session-id" });
+        return send(res, 405, { error: "method not allowed" });
       }
       const body = await readBody(req);
-      if (!isInitializeRequest(body)) {
-        return send(res, 400, { error: "expected an initialize request" });
-      }
-      if (sessions.size >= MAX_SESSIONS) {
-        return send(res, 503, { error: "server busy" });
-      }
-
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
+        sessionIdGenerator: undefined,
         enableJsonResponse: true,
         ...(allowedHosts ? { enableDnsRebindingProtection: true, allowedHosts } : {}),
-        onsessioninitialized: (sid) => {
-          sessions.set(sid, {
-            transport,
-            participationId: ctx.participation.id,
-            projectId: ctx.project.id,
-            lastSeen: Date.now(),
-          });
-        },
       });
-      const mcp = buildServer(ctx);
-      transport.onclose = () => {
-        // Just drop the session. Do NOT call mcp.close() here: onclose fires *because* the
-        // transport is closing, and mcp.close() -> protocol.close() -> transport.close() would
-        // re-fire onclose -> infinite recursion -> stack overflow (MCP SDK 1.29.0 close cycle).
-        // The McpServer holds no background work and is GC'd once the session is dropped.
-        if (transport.sessionId) sessions.delete(transport.sessionId);
-      };
+      // Capture the argument keys AS SENT, before the SDK's zod parse strips the ones this tool does not
+      // declare - that stripping is what makes a misspelled parameter silently succeed (decision 066).
+      let rawCall: RawCall | undefined;
+      try {
+        const b = body as { method?: unknown; params?: { name?: unknown; arguments?: unknown } };
+        if (!Array.isArray(body) && b?.method === "tools/call" && typeof b.params?.name === "string") {
+          const a = b.params.arguments;
+          rawCall = {
+            toolName: b.params.name,
+            argKeys: a && typeof a === "object" && !Array.isArray(a) ? Object.keys(a) : [],
+            // Which hostname this call arrived on, so a caller still using a non-canonical endpoint is told
+            // on every call. Advisory only - never used for auth or routing (the Host header is the
+            // client's to set; DNS-rebinding protection above is what actually constrains it).
+            host: typeof req.headers.host === "string" ? req.headers.host : undefined,
+          };
+        }
+      } catch {
+        /* a body we cannot introspect just means no nag - never fail the call for it */
+      }
+      const mcp = buildServer(ctx, rawCall);
+      // Tear down the per-request transport once the response is done. Only close the transport (not
+      // mcp.close()): the McpServer holds no background work and is GC'd, and closing it would re-enter
+      // the transport close cycle (MCP SDK 1.29.0). close() is idempotent.
+      res.on("close", () => {
+        void Promise.resolve(transport.close()).catch(() => {});
+      });
       await mcp.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (err) {

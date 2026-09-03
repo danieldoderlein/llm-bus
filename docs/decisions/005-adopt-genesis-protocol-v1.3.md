@@ -12,7 +12,7 @@ existing codebase, not a greenfield scaffold and not a migration from a prior pr
 Concretely:
 - The architecture of record is the system that already ships: TypeScript / Node >= 22 (ESM,
   NodeNext, `.js` specifiers), the official MCP SDK over Streamable HTTP, PostgreSQL via `pg`, `zod`,
-  no web framework, a server-rendered admin behind Google SSO, deployed to the shared `odina-vm`.
+  no web framework, a server-rendered admin behind Google SSO, deployed to the shared `the deploy host`.
   It is described - not redesigned - in [docs/architecture.md](../architecture.md).
 - The Definition of Done and Verification Mandate bind to the **real suite**: `npm run typecheck`
   plus the 12 existing tests (including the 500-concurrency proof and the fail-open hook test) via

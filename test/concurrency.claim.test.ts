@@ -54,10 +54,28 @@ async function main(): Promise<void> {
   const mig = await withTx((c) => claimSequence(c, ctx, { sequence: "mig" }));
   if (mig.formatted !== "0001") fail(`expected mig formatted "0001", got "${mig.formatted}"`);
 
+  // 044: claim carries an auto-qualified cross-project id <ownerHandle>/<slug>#<formatted>; the bare id is
+  // unchanged, and the SAME bare id in two DIFFERENT projects yields DISTINCT qualified ids (the whole point).
+  ctx.project.ownerHandle = "acme";
+  const q1 = await withTx((c) => claimSequence(c, ctx, { sequence: "qseq" }));
+  if (q1.formatted !== "1") fail(`qseq bare formatted expected "1", got "${q1.formatted}"`);
+  if (q1.qualified !== `acme/${ctx.project.slug}#1`) fail(`qseq qualified expected "acme/${ctx.project.slug}#1", got "${q1.qualified}"`);
+  const other = await freshProject("claim2");
+  other.project.ownerHandle = "acme"; // same owner handle, DIFFERENT slug -> must NOT collide
+  const q2 = await withTx((c) => claimSequence(c, other, { sequence: "qseq" }));
+  if (q2.formatted !== "1") fail(`other qseq bare expected "1", got "${q2.formatted}"`);
+  if (q2.qualified === q1.qualified) fail(`two projects' qseq#1 must have DISTINCT qualified ids; both got "${q1.qualified}"`);
+  if (q2.qualified !== `acme/${other.project.slug}#1`) fail(`other qseq qualified expected "acme/${other.project.slug}#1", got "${q2.qualified}"`);
+  // pre-backfill (no owner handle) degrades to slug#id
+  ctx.project.ownerHandle = null;
+  const q3 = await withTx((c) => claimSequence(c, ctx, { sequence: "qseq" }));
+  if (q3.qualified !== `${ctx.project.slug}#2`) fail(`null-handle qualified expected "${ctx.project.slug}#2", got "${q3.qualified}"`);
+
   await closePool();
   console.log(
     `OK concurrency.claim: ${N} concurrent claims -> ${unique.size} distinct, gap-free [1..${N}]; ` +
-      `${N} events logged; seed+claim -> R103, padded -> 0001.`,
+      `${N} events logged; seed+claim -> R103, padded -> 0001; 044 qualified id <handle>/<slug>#id is unique ` +
+      `across projects while the bare id is unchanged.`,
   );
 }
 

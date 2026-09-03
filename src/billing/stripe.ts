@@ -6,3 +6,10 @@ import { loadConfig, type Config } from "../config.js";
 export function billingEnabled(_cfg: Config = loadConfig()): boolean {
   return false;
 }
+
+/** Webhook verifier seam. The commercial build returns a real Stripe signature verifier; with no keys
+ *  configured there is nothing to verify, so this is null and the webhook route is never armed. */
+type WebhookVerifier = (raw: string | Buffer, sig: string, secret: string) => unknown;
+export function defaultVerifier(_cfg: unknown): WebhookVerifier | null {
+  return null;
+}

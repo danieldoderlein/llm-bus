@@ -24,9 +24,24 @@ export interface Owner {
  * (ON CONFLICT DO NOTHING returns no row when the email already exists). On first creation a
  * no-card trial credit is granted (decision 015), gated by billingEnabled so dev/self-host and
  * the test suite see no balance changes.
+ *
+ * `opts.landingVariant` (decision 027, gap-B) is UNTRUSTED conversion metadata: it is written to the
+ * `landing_variant` column ONLY on a fresh INSERT (the ON CONFLICT path does NOT touch it, so a repeat
+ * login never overwrites it) and re-validated here to the closed enum as defense in depth. It NEVER
+ * affects which owner resolves - identity derives solely from the email conflict key (invariant 1).
  */
-export async function resolveOwner(email: string): Promise<Owner> {
+export async function resolveOwner(
+  email: string,
+  opts?: { landingVariant?: "everyone" | "dev" | null; channel?: string | null },
+): Promise<Owner> {
   const normalized = email.trim().toLowerCase(); // avoid duplicate owners from IdP case/space variance
+  // Re-validate to the enum: only 'everyone'|'dev' ever reaches SQL (parameterized regardless), else NULL.
+  const variant =
+    opts?.landingVariant === "everyone" || opts?.landingVariant === "dev" ? opts.landingVariant : null;
+  // Re-validate the channel to the same charset as the capture sanitizer (decision 031): belt-and-
+  // suspenders before it reaches SQL, else NULL. Stamped once on create; never read into identity.
+  const channel =
+    typeof opts?.channel === "string" && /^[a-z0-9._-]{1,64}$/.test(opts.channel) ? opts.channel : null;
   const res = await query<{
     id: string;
     email: string;
@@ -40,12 +55,12 @@ export async function resolveOwner(email: string): Promise<Owner> {
     username_confirmed_at: string | null;
     created: boolean;
   }>(
-    `INSERT INTO owners (email) VALUES ($1)
+    `INSERT INTO owners (email, landing_variant, acquisition_channel) VALUES ($1, $2, $3)
      ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
      RETURNING id, email, is_operator, plan, suspended_at, token_balance,
                auto_recharge_amount, stripe_payment_method_id, username, username_confirmed_at,
                (xmax = 0) AS created`,
-    [normalized],
+    [normalized, variant, channel],
   );
   const r = res.rows[0];
   let tokenBalance = Number(r.token_balance);

@@ -1,4 +1,5 @@
 import { query } from "../db.js";
+import { isReservedHandle } from "../platform-identity.js";
 
 // Decision 018: every owner gets a globally-unique public handle (their bus identity). Seeded from the
 // email local-part (always present; the first-run confirm step lets the owner change it), sanitized to
@@ -34,6 +35,10 @@ export async function allocateUsername(ownerId: number, base: string): Promise<s
 
   for (let n = 1; n <= 9999; n++) {
     const candidate = n === 1 ? base : `${base}-${n}`;
+    // Reserved handles are skipped here, not just refused in changeUsername (decision 072). This path runs
+    // with nobody looking - `support@example.com` signing up would otherwise be handed the handle
+    // `support` automatically - so guarding only the handle a person TYPES leaves the automatic one open.
+    if (isReservedHandle(candidate)) continue;
     try {
       const r = await query<{ username: string }>(
         `UPDATE owners SET username = $2 WHERE id = $1 RETURNING username`,
@@ -69,6 +74,9 @@ export async function changeUsername(
   if (!HANDLE_RE.test(h)) {
     return { ok: false, error: "Handle must be 2-32 chars: lowercase letters, numbers, dashes (no leading/trailing dash)." };
   }
+  // The platform's own actor is `<handle>/<label>`, so an owner holding `llm-bus` could name an agent
+  // `support` and be indistinguishable from llm-bus/support wherever an actor is rendered (decision 072).
+  if (isReservedHandle(h)) return { ok: false, error: "That handle is reserved - try another." };
   try {
     const r = await query<{ username: string }>(
       `UPDATE owners SET username = $2, username_confirmed_at = now() WHERE id = $1 RETURNING username`,

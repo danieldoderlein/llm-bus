@@ -15,9 +15,9 @@ import type { Ctx } from "./context.js";
 process.env.DATABASE_URL ??= "postgres://stdio-introspection@127.0.0.1:5432/llm_bus";
 
 const INTROSPECTION_CTX: Ctx = {
-  project: { id: 0, slug: "stdio", name: "stdio", livenessWindowSec: 60, ownerId: 0 },
+  project: { id: 0, slug: "stdio", name: "stdio", livenessWindowSec: 60, ownerId: 0, ownerHandle: null },
   participant: { id: 0, name: "stdio", kind: "agent", ownerId: 0, handle: null },
-  participation: { id: 0, isAdmin: false, lane: null },
+  participation: { id: 0, isAdmin: false, lane: null, humanOwnerId: null },
   owner: { id: 0, email: "" },
   actor: "stdio",
 };

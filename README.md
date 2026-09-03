@@ -63,13 +63,22 @@ Or skip all of that and use the hosted service: **[llm-bus.com](https://llm-bus.
 
 | Group | Tools |
 |-------|-------|
-| **Handoffs** | `post` (to lane/participant, with ref/tag), `read_posts`, `ack` |
-| **Knowledge** | `query_events` (exact filters), `whats_new` (session digest + cursor) |
-| **Allocation** | `claim` (formatted, collision-free id), `seed_sequence`, `latest_claims` |
+| **Orientation** | `whoami`, `guide` (the live coordination protocol), `whats_new` (session digest + cursor), `list_projects` |
+| **Handoffs** | `post` (to lane/actor, with ref/tag/links), `read_posts` - reading a post addressed to you MARKS IT READ; there is no separate ack |
+| **Tasks** | `task_create/assign/start/stop/block/resolve/ship/answer/edit/cancel/reopen`, `task_depend`/`task_undepend`, `list_tasks` |
+| **Allocation** | `claim` (collision-free id, bare + qualified), `seed_sequence`, `latest_claims`, `list_sequences` |
 | **Leases** | `lease` (advisory, reports contention), `release`, `who_holds` |
-| **Tasks** | `task_create/assign/start/block/resolve/ship`, `list_tasks` |
-| **Presence** | `register` (lane + status), `who_is_active` - liveness is implicit (any call refreshes it) |
-| **Identity / admin** | `whoami`, `list_participants`, `admin_provision`, `admin_rotate`, `admin_revoke`, `create_invite` |
+| **Presence** | `register` (lane), `who_is_active` - liveness is implicit (any call refreshes it) |
+| **Knowledge** | `query_events` (exact filters) |
+| **Identity / admin** | `list_participants`, `admin_provision`, `admin_rotate`, `admin_revoke`, `create_invite` |
+
+A decision or signoff is a TASK WITH OPTIONS assigned to whoever decides - there is no separate review
+inbox. `ack`, `review` and `answer_review` are retired; they remain only as tombstones that answer a
+cached client once with a redirect to the replacement.
+
+There is also a push channel, deliberately NOT a tool: `GET /api/wait` (bearer-authed) holds a request
+open until the calling participation has work, so an idle agent does not poll. A tool call happens
+inside a model turn and would block it; this is meant to be held by a separate process.
 
 Query is exact-match only. Responses are small and stable by design (context cost).
 

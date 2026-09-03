@@ -11,6 +11,8 @@ import {
   redeemInvite,
   buildInvitePrompt,
   buildJoinFiles,
+  coordinationGuide,
+  buildHandoutPrompt,
 } from "../src/invite.js";
 
 const errors: string[] = [];
@@ -90,6 +92,10 @@ async function main(): Promise<void> {
     prompt.includes("OKF") && prompt.includes("okf/SPEC.md") && prompt.toLowerCase().includes("wiki"),
     "invite prompt missing the OKF knowledge-layer pointer",
   );
+  // Multi-use invites must say so (was hardcoded "one redemption"); over-large uses clamp to the 1..50 max.
+  check(buildInvitePrompt("P", "C", null, "https://x", 24, false, 10).includes("10 redemptions"), "multi-use prompt should say N redemptions");
+  check(buildInvitePrompt("P", "C", null, "https://x", 24, false, 1).includes("one redemption"), "single-use prompt should say one redemption");
+  check(buildInvitePrompt("P", "C", null, "https://x", 24, false, 999).includes("50 redemptions"), "uses over 50 should clamp to 50 in the prompt");
 
   // 8) Cross-owner: another owner can neither create an invite for this project nor revoke its invite.
   const other = await freshProject("invite-other");
@@ -112,6 +118,35 @@ async function main(): Promise<void> {
     const actx = await authenticate(`Bearer ${ar.token}`);
     check(actx?.participation.isAdmin === true, "admin-invite token did not resolve is_admin=true");
   }
+
+  // 11) The coordination guide teaches the lane mental model (lanes are shared rooms; clashes are
+  //     prevented by leases/claims/named hand-offs, not by splitting lanes) - pin it so it can't regress
+  //     back to the thin "addressing labels" line that confused teammates on a shared lane.
+  const guide = coordinationGuide(false);
+  check(/shared rooms?, not (a )?walls?/i.test(guide), "guide must teach lanes are shared rooms, not walls");
+  check(
+    guide.toLowerCase().includes("lease") && guide.toLowerCase().includes("claim(") && guide.includes("to_actor"),
+    "guide must name the collision primitives (lease / claim() / to_actor)",
+  );
+  check(
+    /split (a )?lane/i.test(guide) && /never/i.test(guide),
+    "guide must say to split lanes only when work is separable, never just to avoid clashing",
+  );
+  // There is deliberately no contact_support tool, so the protocol itself has to answer "how do I report
+  // a problem with the server". An agent that cannot find the route invents one - filing a server bug as a
+  // task on its OWN board, where only its own people are looking. On a self-hosted bus the route is the
+  // operator who runs it, so the guide must say BOTH where to go and that the missing tool is deliberate.
+  check(/tell YOUR human/i.test(guide), "guide must route a server problem to the operator who runs it");
+  check(
+    /NO tool for reporting it/i.test(guide) && /do not file a server bug as a task/i.test(guide),
+    "guide must say the missing tool is deliberate and that filing it as a task reaches nobody",
+  );
+
+  // The full hand-out prompt embeds the guide, so a granted agent gets the same model.
+  check(
+    /shared rooms?, not (a )?walls?/i.test(buildHandoutPrompt("Proj", "h/agent", "tok", "https://x/mcp", false)),
+    "buildHandoutPrompt should embed the coordination guide with the lane model",
+  );
 
   finish();
 }

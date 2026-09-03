@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   const projectId = ctx.project.id;
 
   // 1. createOrgInvite + acceptInvite issues a working token for the right project + role.
-  const inv = await createOrgInvite(ownerId, projectId, { kind: "human", isAdmin: false });
+  const inv = await createOrgInvite(ownerId, projectId, { isAdmin: false });
   check(inv !== null, "createOrgInvite returned null for an owned project");
   const accepted = await acceptInvite(inv!.token, "Bob@Example.com");
   check(accepted.ok === true, `acceptInvite failed: ${JSON.stringify(accepted)}`);
@@ -32,7 +32,8 @@ async function main(): Promise<void> {
     const actx = await authenticate(`Bearer ${accepted.token}`);
     check(actx?.project.id === projectId, "accepted token did not resolve to the invite's project");
     check(actx?.participation.isAdmin === false, "non-admin invite resolved is_admin=true");
-    check(accepted.participant === "human-bob", `derived name: ${accepted.participant}`);
+    // Decision 057: the derived seat name is the bare local-part, no "human-" prefix.
+    check(accepted.participant === "bob", `derived name: ${accepted.participant}`);
   }
 
   // 2. Single-use: a second accept on the same token is already_accepted and mints no new token.
@@ -90,6 +91,61 @@ async function main(): Promise<void> {
   const foreign = await freshProject("invite-accept-foreign");
   const refused = await createOrgInvite(foreign.project.ownerId, projectId, {});
   check(refused === null, "createOrgInvite allowed a non-owner to mint against the project");
+
+  // ── 8. Decision 068: an invite must never RE-BIND an existing agent's seat ─────────────────────────
+  // Reported from project-a. A project admin sent an invite whose participant_name collided with the CALLER'S
+  // OWN agent name. On acceptance the existing participant row was reused and the accepter was stamped as
+  // its human driver - so the original agent's UNCHANGED bearer token began authenticating as a DIFFERENT
+  // PERSON's actor, two humans shared one row, and demoting "the new agent" from the web demoted the
+  // original lead. Identity moved because of a third party's action, which invariant 1 forbids.
+  const seatCtx = await freshProject("invite-seat");
+  const pool2 = getPool();
+  await pool2.query(`UPDATE participants SET name = 'dev-agent' WHERE id = $1`, [seatCtx.participant.id]);
+  const incumbentToken = randomBytes(24).toString("base64url");
+  await pool2.query(`INSERT INTO tokens (participation_id, token_hash) VALUES ($1, $2)`, [
+    seatCtx.participation.id,
+    hashToken(incumbentToken),
+  ]);
+  const beforeActor = (await authenticate(`Bearer ${incumbentToken}`))?.actor;
+
+  const takerEmail = `seat-taker-${seatCtx.project.id}@test.local`;
+  const collide = await createOrgInvite(seatCtx.project.ownerId, seatCtx.project.id, {
+    intendedName: "dev-agent", // the SAME name the incumbent holds
+    targetEmail: takerEmail,
+    ttlHours: 24,
+  });
+  check(collide !== null, "the colliding invite is minted (the collision is caught at ACCEPT)");
+  const taken = await acceptInvite(collide!.token, takerEmail);
+  check(!taken.ok && taken.error === "name_taken", `expected name_taken, got ${taken.ok ? "ok" : taken.error}`);
+
+  // The incumbent is untouched: same actor, same admin flag, still exactly one live token.
+  const afterActor = (await authenticate(`Bearer ${incumbentToken}`))?.actor;
+  // Guard against a VACUOUS pass: if authenticate returned null both times, `afterActor === beforeActor`
+  // is trivially true and asserts nothing. Pin that the actor actually resolved before comparing it.
+  check(typeof beforeActor === "string" && beforeActor.length > 0, `the incumbent token must authenticate, got ${beforeActor}`);
+  check(afterActor === beforeActor, `the incumbent keeps its identity: ${beforeActor} -> ${afterActor}`);
+  const drv = await pool2.query<{ human_owner_id: string | null; is_admin: boolean }>(
+    `SELECT human_owner_id, is_admin FROM participations WHERE id = $1`,
+    [seatCtx.participation.id],
+  );
+  check(drv.rows[0].human_owner_id === null, "a refused invite must not stamp a human driver on the incumbent");
+  check(drv.rows[0].is_admin === true, "the incumbent keeps its admin flag");
+  const tokCount = await pool2.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM tokens WHERE participation_id = $1 AND revoked_at IS NULL`,
+    [seatCtx.participation.id],
+  );
+  check(Number(tokCount.rows[0].n) === 1, `no second token on the incumbent's seat, got ${tokCount.rows[0].n}`);
+
+  // Positive control: a DISTINCT name still works, so the refusal is targeted rather than a blanket block.
+  const okEmail = `seat-ok-${seatCtx.project.id}@test.local`;
+  const okInvite = await createOrgInvite(seatCtx.project.ownerId, seatCtx.project.id, {
+    intendedName: "second-agent",
+    targetEmail: okEmail,
+    ttlHours: 24,
+  });
+  const okAccept = await acceptInvite(okInvite!.token, okEmail);
+  check(okAccept.ok, `a distinct seat name must still be accepted, got ${okAccept.ok ? "ok" : okAccept.error}`);
+  check(okAccept.ok && okAccept.isAdmin === false, "an invite without is_admin must NOT yield admin");
 
   finish();
 }

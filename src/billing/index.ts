@@ -24,3 +24,9 @@ export async function chargeTopUp(
 ): Promise<"credited" | "pending" | "no_card" | "disabled" | "bad_amount" | "declined"> {
   return "disabled";
 }
+
+/** Apply a payment-provider webhook. Inert here: the OSS build has no payment provider, and
+ *  billingEnabled() is false, so this is never reached from the webhook route. */
+export async function applyWebhook(_event: unknown): Promise<void> {
+  return;
+}
